@@ -44,6 +44,39 @@ class OfflineGuardFdPathTest(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    def test_blocked_spawn_is_attributed_in_diagnostics(self):
+        """被拦的 spawn 必须留下**归因栈**（否则只能靠猜谁在 spawn）。"""
+        import sys as _sys
+        log = Path(OfflineGuard.DIAG_LOG)
+        log.unlink(missing_ok=True)
+        guard = OfflineGuard()
+        with self.assertRaises(RuntimeError):
+            guard.audit("subprocess.Popen",
+                        (_sys.executable, [_sys.executable, "-c", "pass"], None, None))
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("spawn-blocked", text)
+        self.assertIn("origin=", text)
+
+    def test_origin_falls_back_to_current_test_on_threads(self):
+        """线程里（无测试帧）也必须能归因到触发它的用例。"""
+        import threading
+        from tests import offline_suite
+        offline_suite.track_current_test()
+        saved = offline_suite.CURRENT_TEST['id']
+        # 直接构造"当前用例"记号：本用例的 run() 早在装壳前就已开始，
+        # 所以壳不会覆盖到它自己（这也是真实套件里壳先于用例安装的原因）。
+        offline_suite.CURRENT_TEST['id'] = (
+            f"{type(self).__module__}.{type(self).__name__}.{self._testMethodName}")
+        holder = {}
+        try:
+            worker = threading.Thread(
+                target=lambda: holder.update(origin=offline_suite.OfflineGuard._origin()))
+            worker.start(); worker.join()
+        finally:
+            offline_suite.CURRENT_TEST['id'] = saved
+        self.assertIn(type(self).__name__, holder["origin"],
+                      f"线程归因丢了：{holder.get('origin')}")
+
     def test_relative_target_inside_repo_data_is_still_protected(self):
         guard = OfflineGuard()
         data_dir = ROOT / "data"

@@ -13,6 +13,33 @@ import sys
 import unittest
 
 
+#: 当前正在跑的测试 id（**跨线程可见**）。unittest 没有"当前用例"全局 API，自装一个：
+#: app/路由的阻塞点常发生在 worker 线程（anyio to_thread），栈里没有任何测试帧 ——
+#: 实测 59 次拦截里 57 次因此归因成 `no-test-frame`；文件版诊断日志又常被"patch 掉
+#: open 的文件隔离用例"挡掉。一个全局记号把这两个归因盲区一起堵上。
+CURRENT_TEST: dict = {'id': None}
+
+
+def track_current_test() -> dict:
+    """给 `unittest.TestCase.run` 装一层壳，把当前用例写进 `CURRENT_TEST`（幂等）。"""
+    if getattr(unittest.TestCase.run, "_r20_tracked", False):
+        return CURRENT_TEST
+    original_run = unittest.TestCase.run
+
+    def tracked(self, result=None):
+        previous = CURRENT_TEST['id']
+        CURRENT_TEST['id'] = (f"{type(self).__module__}.{type(self).__name__}"
+                              f".{self._testMethodName}")
+        try:
+            return original_run(self, result)
+        finally:
+            CURRENT_TEST['id'] = previous
+
+    tracked._r20_tracked = True
+    unittest.TestCase.run = tracked
+    return CURRENT_TEST
+
+
 class OfflineGuard:
     def __init__(self, root=None):
         self.root = Path(root or Path(__file__).resolve().parents[1]).resolve()
@@ -25,6 +52,10 @@ class OfflineGuard:
         self.attempts = []
         self.writes = []
         self.children = []
+        #: 归因直方图 {origin: 次数}。**必须内联进 report() 输出** ——
+        #: 文件版诊断日志（DIAG_LOG）会被"patch 掉 open 的文件隔离用例"挡住写不进去，
+        #: 实测 59 次拦截只留下 8 行日志。计数不依赖文件 IO，故最可靠。
+        self.block_origins: dict[str, int] = {}
         self.before = self.fingerprint()
 
     def fingerprint(self):
@@ -170,9 +201,16 @@ class OfflineGuard:
                 )))
             if not allowed:
                 self.attempts.append('external child process: ' + executable)
+                # ⚠️ 第七十七刀给 protected-write 补过归因，这里当时漏了 —— 结果
+                # "谁在 spawn" 只能靠猜（实测 50 次 python 拦截查不到归属）。与网络/
+                # 写拦截同规：先记栈再抛，绝不改变 fail-closed 语义。
+                self._note_origin(self._origin())
+                self._log_diagnostics('spawn-blocked', args[:2])
                 raise RuntimeError('Offline suite blocked external child process')
         if event == 'os.system':
             self.attempts.append('shell command')
+            self._note_origin(self._origin())
+            self._log_diagnostics('shell-blocked', args[:2])
             raise RuntimeError('Offline suite blocked shell command')
         targets = []
         if event == 'open' and isinstance(args[2], int) and args[2] & (
@@ -193,6 +231,29 @@ class OfflineGuard:
                 raise RuntimeError('Offline suite blocked real resource mutation')
 
     DIAG_LOG = '/tmp/offline_guard_diagnostics.log'
+
+    @staticmethod
+    def _origin() -> str:
+        """拦截点归属：最近一个测试帧（文件名:行号 in 函数名），取不到给 `no-test-frame`。"""
+        try:
+            import pathlib
+            import traceback
+            stack = traceback.extract_stack()[:-3]
+            test_frames = [f for f in stack
+                           if ('/tests/' in f.filename
+                               and pathlib.Path(f.filename).name.startswith('test_'))
+                           or '/unittest/case.py' in f.filename]
+            if test_frames:
+                frame = test_frames[-1]
+                return f'{frame.filename.rsplit("/", 1)[-1]}:{frame.lineno} in {frame.name}'
+        except Exception:
+            pass
+        if CURRENT_TEST.get('id'):
+            return f"{CURRENT_TEST['id']} [thread]"
+        return 'no-test-frame'
+
+    def _note_origin(self, origin: str) -> None:
+        self.block_origins[origin] = self.block_origins.get(origin, 0) + 1
 
     def _log_diagnostics(self, event, args):
         """Append-only attribution: record the blocking call stack. Never
@@ -256,6 +317,9 @@ class OfflineGuard:
         print('CONFIG_FINGERPRINT_CHANGES:', changed)
         print('CONFIG_WRITE_ATTEMPTS:', sorted(set(self.writes)))
         print('LOCAL_SUBPROCESSES:', sorted(set(self.children)))
+        if self.block_origins:
+            print('BLOCK_ORIGINS:', sorted(self.block_origins.items(),
+                                           key=lambda kv: -kv[1]))
         return not (self.attempts or changed or self.writes)
 
 
@@ -264,6 +328,7 @@ def main():
     # 否则它们会被 audit hook 拦下抛 RuntimeError（套件变脏 + 报 ERROR），
     # 而它们本意只是"本环境无法验证"。判据必须**先于**子进程存在。
     os.environ['OFFLINE_SUITE_RUNNING'] = '1'
+    track_current_test()          # 线程级归因：必须先于任何用例执行
     guard = OfflineGuard().install()
     os.chdir(guard.root)
     guard.prove_connection_guard()

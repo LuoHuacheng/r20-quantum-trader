@@ -33,6 +33,8 @@ class TestLivenessWithoutProc(unittest.TestCase):
         with patch.object(supervisor, "_PROC_AVAILABLE", False):
             self.assertTrue(supervisor._is_gateway_worker(os.getpid()))
 
+    @unittest.skipIf(os.environ.get("OFFLINE_SUITE_RUNNING"),
+                     "以 spawn 为被测对象：离线套件按约定在 spawn 前自跳")
     def test_dead_pid_still_reported_dead_without_proc(self):
         with patch.object(supervisor, "_PROC_AVAILABLE", False):
             self.assertFalse(supervisor._is_gateway_worker(self._dead_pid()))

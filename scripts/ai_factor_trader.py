@@ -52,6 +52,8 @@ from scripts.trader.venue_evidence import (
     build_venue_candidates as _venue_evidence_candidates,
     persist_venue_decision as _venue_evidence_persist,
 )
+# 账户模式闸（2026-09-22 每单 51010 事故加固）：凭证齐 ≠ 能下合约单
+from scripts.okx_account_mode import account_mode_ready as okx_account_mode_ready
 from scripts.trader.cycle_stages import (
     fetch_positions_and_reconcile,
     scan_risk_gates_and_ai_brain,
@@ -617,12 +619,25 @@ def load_routing_mode() -> str:
         routing_policy=routing_policy)
 
 def venue_execution_ready(venue: str, environment: str) -> bool:
-    """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。"""
-    return _venue_query_exec_ready(
-        venue, environment,
-        venue_registry=venue_registry,
-        current_environment=current_environment,
-        _BROKEN_VENUES=_BROKEN_VENUES)
+    """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。
+
+    + **OKX 账户模式闸**（2026-09-22 每单 51010 事故加固）。
+
+    旧判据只校「凭证齐 + 环境一致」⇒ 账户被切回 `acctLv=1`（简单/现货）时 okx
+    仍判就绪，均衡哈希把 BTC/SOL/XRP/SUI 派过去，每 15 分钟白烧一单 51010，
+    OKX 侧挂单/成交/持仓长期全 0。现在凭证就绪后再验账户模式：**确证**不支持合约
+    即摘除本所执行资格（executable=False → `venue_routing/selection.py` 硬筛淘汰）。
+    探测失败 fail-open（子模块负责），绝不因读账户配置失败让交易停摆。
+    """
+    if not _venue_query_exec_ready(
+            venue, environment,
+            venue_registry=venue_registry,
+            current_environment=current_environment,
+            _BROKEN_VENUES=_BROKEN_VENUES):
+        return False
+    if str(venue or "").strip().lower() != "okx":
+        return True
+    return okx_account_mode_ready(current_environment())
 
 def fetch_other_venue_positions(environment: str):
     """壳（第八十六刀搬至 `scripts/trader/venue_query.py`）。"""

@@ -12,6 +12,13 @@ Design contract (mission/okx-cli-removal, US-001):
   the removed ``okx`` command line and never touches child processes.
 - Fail-closed: any private call with an unconfigured credential group raises
   ``OKXNotConfigured`` *before* a network request is made.
+- ``/api/v5/trade/order-precheck`` **不可用作「能否下单」的就绪探针**：2026-09-22
+  实测本账户对它**任何**单（含现货 BTC-USDT、posSide 的 long/省略/net 三种写法）
+  恒回 ``51010``，切账户模式前后无差别 —— 拿它自检只会得到「永远不可交易」的
+  假信号，拿它「复现故障」也会把结论带偏。就绪判据只信 ``/api/v5/account/config``
+  （见 ``scripts/okx_account_mode.py``）。
+- 业务码附带中文根因后缀（``_SCODE_HINTS``）：只**追加**在 ``OKX <code>: <msg>``
+  之后，既有前缀契约不变（测试与外部解析均按前缀匹配）。
 - Signature口径 identical to ``r20_backend.okx_trade_service._request``:
   prehash = timestamp + method + request_path + body, HMAC-SHA256 keyed with the
   secret then base64; demo mode adds ``x-simulated-trading: 1``.
@@ -48,6 +55,37 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 DEFAULT_TIMEOUT = 20
+
+#: 常见 V5 业务码 → 中文根因（排障用）。**只追加**在原文之后：既有 ``OKX <code>: <msg>``
+#: 前缀是测试与外部解析的契约，动了就等着翻红。
+_SCODE_HINTS = {
+    "50011": "请求超时或签名/时间戳不合规",
+    "50101": "API Key 与所请求的环境档不匹配（demo key 打实盘 / 反之）",
+    "51000": "参数错误：重点查 posSide 是否与账户持仓模式（net/long_short）一致、tdMode、价格与数量精度",
+    "51001": "合约不存在，或不属于当前环境档",
+    "51004": "下单价格/数量精度不符（tickSz / lotSz）",
+    "51006": "下单价格超出交易所价格限制带（远挂单常见）",
+    "51008": "保证金不足：可用余额不够，或被挂单占用后超限",
+    "51010": "账户模式不支持该请求：合约单需「单币种/跨币种保证金」（acctLv=2/3/4）；简单/现货模式（acctLv=1）一律被拒",
+    "51011": "clOrdId 重复",
+    "51012": "杠杆超出该合约上限",
+    "51020": "下单数量不满足最小下单量 / 步进要求",
+    "51121": "订单数量必须是整数张（lotSz 步进）",
+    "51402": "止盈止损触发价与方向不符（多单须 TP > 入场 > SL）",
+    "51420": "该订单不存在或已终结（查单/撤单常见）",
+}
+
+
+def scode_hint(code: Any) -> str:
+    """业务码的中文根因；未知码返回空串（不猜）。"""
+    return _SCODE_HINTS.get(str(code or "").strip(), "")
+
+
+def _business_error(code: Any, msg: Any, default: str) -> RuntimeError:
+    """统一业务错误：`OKX <code>: <msg>` 前缀不变，中文根因追加在后。"""
+    hint = scode_hint(code)
+    tail = f"（中文根因：{hint}）" if hint else ""
+    return RuntimeError(f"OKX {code}: {msg or default}{tail}")
 
 
 class OKXNotConfigured(RuntimeError):
@@ -231,11 +269,11 @@ def request(
     rows = [row for row in data if isinstance(row, dict)]
     failures = [row for row in rows if str(row.get("sCode", "0")) != "0"]
     if failures:
-        raise RuntimeError(
-            f"OKX {failures[0].get('sCode')}: {failures[0].get('sMsg') or '业务请求失败'}"
-        )
+        raise _business_error(
+            failures[0].get("sCode"), failures[0].get("sMsg"), "业务请求失败")
     if str(payload_json.get("code", "0")) != "0":
-        raise RuntimeError(f"OKX {payload_json.get('code')}: {payload_json.get('msg') or '请求失败'}")
+        raise _business_error(
+            payload_json.get("code"), payload_json.get("msg"), "请求失败")
     return rows
 
 

@@ -45,6 +45,7 @@
 |---|---|---|
 | `okx_rest.py` | 552 | OKX V5 签名 REST 客户端（请求契约显式） |
 | `okx_runtime.py` | 87 | OKX 实盘/模拟盘凭证的单一来源 |
+| `okx_account_mode.py` | 208 | OKX **账户模式**预检（`acctLv`/`posMode`）：确证模式不支持合约时摘除本所执行资格（2026-09-22 每单 51010 事故加固；`order-precheck` 不可用作探针） |
 | `sync_full_ledger.py` | 724 | OKX 持仓历史 → 本地台账同步 |
 | `archive_ledger.py` | 198 | 台账分片归档（**默认 dry-run**） |
 | `risk_constants.py` | 175 | 执行层风控参数单一事实源 |

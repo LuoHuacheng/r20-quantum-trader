@@ -38,6 +38,22 @@ LOCAL_DIR = BACKUPS / "local"
 SQLITE_DIR = BACKUPS / "sqlite"
 MANIFEST_DIR = BACKUPS / "manifests"
 BJ_TZ = timezone(timedelta(hours=8))
+
+
+def relative_to_root(path: Path | str) -> str:
+    """相对 ROOT 的展示路径——两侧**都先 resolve**。
+
+    macOS 上 `/var` 是指向 `/private/var` 的符号链接：tempfile 给出的根是未解析的
+    `/var/...`，而 retain_local_archive / sqlite_hot_backups 返回 resolve() 后的
+    `/private/var/...`，直接 `relative_to(ROOT)` 必抛 ValueError —— 本地灾备目标
+    因此 100% 记成 partial。resolve 两侧语义不变，只抹掉符号链接差异；
+    真在 ROOT 之外时退回绝对路径（可观测性不许把整次备份判死）。
+    """
+    resolved = Path(path).resolve()
+    try:
+        return str(resolved.relative_to(Path(ROOT).resolve()))
+    except ValueError:
+        return str(resolved)
 MAGIC = b"R20GCM2\x00"
 MANDATORY_EXCLUDES = (
     ".git/**", ".env", ".okx/**", ".bypy/**", "backups/**", "*/backups/**", "logs/**",
@@ -393,7 +409,8 @@ def deliver_target(source: Path, target: dict[str, Any]) -> dict[str, Any]:
         return {
             "success": True,
             "attempts": 1,
-            "destination": str(retain_local_archive(source, int(target.get("retention", 3)), destination).relative_to(ROOT)),
+            "destination": relative_to_root(
+                retain_local_archive(source, int(target.get("retention", 3)), destination)),
         }
     upload = upload_s3 if target_type == "s3" else upload_oss if target_type == "oss" else upload_webdav if target_type in {"webdav", "aliyundrive", "quark"} else None
     if not upload:
@@ -458,7 +475,7 @@ def run_backup_job(job: dict[str, Any]) -> dict[str, Any]:
                 result["targets"].append({"id": target.get("id", "target"), "type": target.get("type", "unknown"), **target_result})
         if job.get("sqlite", {}).get("enabled"):
             sqlite_dir = SQLITE_DIR / safe_id
-            result["sqlite"] = [str(x.relative_to(ROOT)) for x in sqlite_hot_backups(stamp, int(job["sqlite"].get("retention", 7)), sqlite_dir)]
+            result["sqlite"] = [relative_to_root(x) for x in sqlite_hot_backups(stamp, int(job["sqlite"].get("retention", 7)), sqlite_dir)]
         target_success = [x for x in result["targets"] if x.get("success")]
         target_failure = [x for x in result["targets"] if not x.get("success")]
         any_success = bool(target_success or result["sqlite"])
@@ -479,5 +496,5 @@ def run_backup_job(job: dict[str, Any]) -> dict[str, Any]:
     manifest = MANIFEST_DIR / f"{safe_id}_{stamp}.json"
     manifest.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.chmod(manifest, 0o600)
-    result["manifest"] = str(manifest.relative_to(ROOT))
+    result["manifest"] = relative_to_root(manifest)
     return result

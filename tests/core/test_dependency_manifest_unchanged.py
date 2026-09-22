@@ -40,6 +40,12 @@ git log --oneline --grep="第.*刀" -- frontend/package-lock.json → 0
 `fastapi` `uvicorn` `jinja2` `requests` `pandas` `numpy` `openpyxl`
 `cryptography` `httpx` `python-multipart` `pydantic`
 
+> **2026-09-22 变更登记**（按本文档第 34 行的流程更新哈希）：新增 `websockets>=12.0,<19.0`。
+> 依据：`r20_backend/qq_gateway_daemon.py` 与 `r20_backend/qq_bind.py` **直接**
+> `import websockets`（QQ 通道生产路径），而清单一直漏声明 —— 裸仓库按
+> `requirements.txt` 安装后该功能 ImportError、`tests/venues` 25 例连带报错。
+> 属"有意补声明"，故从下方 `KNOWN_UNDECLARED` 的未声明名单里摘除。
+
 `frontend/package.json` 的 `dependencies`：
 `@tailwindcss/vite` `lucide-vue-next` `pinia` `tailwindcss` `vue`
 `vue-router` `klinecharts` `lightweight-charts`
@@ -60,7 +66,7 @@ ROOT = Path(__file__).resolve().parents[2]
 #: 结构优化阶段基线（第六十九刀记录）
 BASELINE: dict[str, str] = {
     "requirements.txt":
-        "ff13cf1aa8191385efaf0196d7e4f7df52ca8ea42543df74a47bdeab3d8c2fcb",
+        "3468e19a776e94242736480ec1994f3ea9aa83dd42b28b411fe9b80da3d0ecf4",
     "frontend/package.json":
         "a558a88f9e1704e639cfb57fa37d98968b8fed052c9b47c9bfc9a6cd44269eb6",
 }
@@ -168,15 +174,15 @@ class DependencyManifestUnchangedTest(unittest.TestCase):
             local |= {f.stem for f in base.glob("*.py")}
 
         #: 预先存在、未在本阶段声明清单里的导入（**均已实测确认**）
-        #: - `starlette` / `websockets`：fastapi / uvicorn 的传递依赖，
-        #:   实测本 venv 内可导入（starlette 1.6.0、websockets 17.1）；
+        #: - `starlette`：fastapi 的传递依赖，实测本 venv 内可导入（1.6.0）；
+        #:   （`websockets` 曾在此登记为未声明，2026-09-22 已正式写进 requirements.txt）；
         #: - `urllib3`：requests 的传递依赖，实测可导入（2.7.0）；
         #: - `segno`：**实测未安装**，但 `routers/gateway/backups.py` 里是
         #:   `try: import segno … except Exception: pass` 的**可选**导入，
         #:   失败时 `qr_data_uri` 退化为 `""`（二维码是可选增强，不影响绑定流程）。
         #: 以上都不是本阶段引入的，也不属本阶段授权范围，故如实登记。
         KNOWN_UNDECLARED = {
-            "starlette", "websockets", "urllib3", "segno",
+            "starlette", "urllib3", "segno",
             "dotenv", "yaml", "PIL", "pkg_resources", "bypy", "oss2",
         }
 

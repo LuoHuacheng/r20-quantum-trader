@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from r20_gateway import supervisor
+from r20_gateway.pidfile import PID_FILE
 
 
 class TestLivenessWithoutProc(unittest.TestCase):
@@ -39,7 +40,8 @@ class TestLivenessWithoutProc(unittest.TestCase):
     def test_current_pid_keeps_pid_file_for_live_worker(self):
         """活体持锁者自我登记的文件绝不能被判活逻辑删掉。"""
         with tempfile.TemporaryDirectory() as tmp:
-            pid_file = Path(tmp) / "r20_gateway.pid"
+            # 路径字面量只允许留在 pidfile.py（extraction 审计）：这里复用常量名
+            pid_file = Path(tmp) / PID_FILE.name
             pid_file.write_text(str(os.getpid()), encoding="utf-8")
             with patch.object(supervisor, "_PROC_AVAILABLE", False), \
                     patch.object(supervisor, "PID_FILE", pid_file):

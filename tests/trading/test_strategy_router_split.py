@@ -51,7 +51,16 @@ def _routes_in(node_src: str) -> list:
 
 
 class StrategyRouterSplitTest(unittest.TestCase):
-    def test_static_route_table_is_identical_and_ordered(self):
+    def test_static_route_table_preserves_split_baseline(self):
+        """拆分基线的 35 条路由必须**一条不少、相对顺序不变**地出现在当前路由表里。
+
+        ⚠️ 原断言是"逐项相等"—— 那只在拆分当刻成立：这之后新增的接口
+        （如 `/api/v1/admin/evolution/config` GET/PUT）会让它永久变红，反而淹没真实回归。
+        本门的真实不变量是「**没少路由、没被重排**」：同一路径前缀互相遮蔽的处理器
+        靠注册顺序生效，顺序变了才是线上事故；新增接口的接口面由下方
+        `test_live_openapi_route_surface_unchanged` 兜底。另加"同一 (路径,方法) 不得
+        注册两次"防重。基线与当前逐项相等时的严格模式不再是必需。
+        """
         r = subprocess.run(["git", "show", f"{PRE}:{BASELINE}"],
                            capture_output=True, text=True, cwd=str(ROOT))
         self.assertEqual(r.returncode, 0, f"基线取不到：{r.stderr[:200]}")
@@ -61,8 +70,17 @@ class StrategyRouterSplitTest(unittest.TestCase):
         got = []
         for name in INCLUDE_ORDER:
             got.extend(_routes_in((PKG / f"{name}.py").read_text(encoding="utf-8")))
-        self.assertEqual(got, want,
-                         "路由表（路径/方法/处理器名/顺序）与拆分前不一致")
+
+        cursor = iter(got)          # 顺序敏感的子序列判定：基线一条不落地按序命中
+        missing = [route for route in want if not any(route == g for g in cursor)]
+        self.assertEqual(missing, [],
+                         "路由表少了基线路由或被重排（同前缀遮蔽顺序会因此改变）")
+        seen, duplicates = set(), []
+        for route in got:
+            if route in seen:
+                duplicates.append(route)
+            seen.add(route)
+        self.assertEqual(duplicates, [], f"同一 (路径, 方法) 被注册了多次: {duplicates}")
 
     def test_live_openapi_route_surface_unchanged(self):
         from r20_backend.app import app

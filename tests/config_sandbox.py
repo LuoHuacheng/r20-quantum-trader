@@ -132,6 +132,13 @@ def isolate_config(test):
             p.start(); test.addCleanup(p.stop)
     app = sys.modules.get("r20_backend.app")
     if app is not None:
+        # ⚠️ app 的 lifespan 会 `start_gateway_supervisor()` —— 单持有者锁空闲时它会
+        # **真 spawn 一个 gateway worker 子进程**（带着调度器所有权跑定时任务）。
+        # 测试里这既不必要又危险（后台守护进程 + 离线护栏拦截噪声）。沙箱一律掐掉。
+        for name in ("start_gateway_supervisor", "stop_gateway_supervisor"):
+            if hasattr(app, name):
+                probe = patch.object(app, name, lambda *a, **k: None)
+                probe.start(); test.addCleanup(probe.stop)
         git_probe = patch.object(app, "git", side_effect=lambda args: (
             "0 0" if args[0] == "rev-list" else "test" if args[0] == "branch" else
             "" if args[0] in ("fetch", "status") else "abc1234"))

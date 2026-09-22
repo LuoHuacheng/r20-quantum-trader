@@ -179,9 +179,12 @@ class TestDailyBriefingNoFakeZero(unittest.TestCase):
         with open(ledger, "w") as f:
             f.write(ledger_content)
         pushed = []
+        # ⚠️ 真正的 spawn 走的是 _run_captured → r20_backend.spawn.run_script；
+        # 旧实现只打了 ds.subprocess（打错了靶），于是每次简报都真 fork 一个脚本。
         with patch.object(ds, "LEDGER_JSON_FILE", ledger), \
              patch.object(ds, "notify_daily_summary", lambda t: pushed.append(t)), \
              patch.object(ds, "subprocess", type("S", (), {"run": staticmethod(lambda *a, **k: None)})), \
+             patch.object(ds, "_run_captured", lambda *a, **k: None), \
              redirect_stdout(io.StringIO()):
             text = ds.generate_daily_briefing_and_backup()
         return text, pushed

@@ -231,6 +231,11 @@ class LockedRmwTests(_Base):
 
     def test_concurrent_pool_writes_do_not_lose_updates(self):
         import scripts.instrument_pool as ip
+        # 本用例的主题是「锁下的 RMW 不丢更新」；`save_instruments` 会 fail-soft
+        # 扇出下游刷新（每存一次 fork 一个脚本，实测 40 次）—— 与主题无关，
+        # 打桩掉，免得既拖慢用例又污染离线护栏基线。
+        _no_sync = patch.object(ip, "sync_instruments_state", lambda: None)
+        _no_sync.start(); self.addCleanup(_no_sync.stop)
         pool_file = self.root / "data" / "instrument_pool.json"
         pool_file.parent.mkdir(parents=True, exist_ok=True)
         pool_file.write_text(json.dumps({"version": 1, "instruments": [
@@ -394,7 +399,11 @@ class HighRiskConfirmationTests(_Base):
         import r20_backend.app as app_mod
         from r20_backend.routers import risk as risk_router
         client = TestClient(app_mod.app)
-        with patch.object(risk_router, "require_superadmin", lambda *a, **k: {"username": "t"}), \
+        # 本用例只测"缺确认短语必须 400"；app lifespan 的网关 supervisor 会
+        # spawn 真 worker，与主题无关 —— 掐掉（离线护栏也会把它拦成噪声）。
+        with patch.object(app_mod, "start_gateway_supervisor", lambda *a, **k: None), \
+             patch.object(app_mod, "stop_gateway_supervisor", lambda *a, **k: None), \
+             patch.object(risk_router, "require_superadmin", lambda *a, **k: {"username": "t"}), \
              patch.object(risk_router, "audit_record", lambda *a, **k: None), \
              patch.object(risk_router, "update_env", lambda values: None):
             res = client.post("/api/v1/admin/risk", json={"values": {"R20_SINGLE_ASSET_EQUITY_RATIO": 1.0}})
@@ -407,7 +416,9 @@ class HighRiskConfirmationTests(_Base):
         from r20_backend.routers import risk as risk_router
         client = TestClient(app_mod.app)
         calls: list[dict] = []
-        with patch.object(risk_router, "require_superadmin", lambda *a, **k: {"username": "t"}), \
+        with patch.object(app_mod, "start_gateway_supervisor", lambda *a, **k: None), \
+             patch.object(app_mod, "stop_gateway_supervisor", lambda *a, **k: None), \
+             patch.object(risk_router, "require_superadmin", lambda *a, **k: {"username": "t"}), \
              patch.object(risk_router, "audit_record", lambda *a, **k: None), \
              patch.object(risk_router, "refresh_settings", lambda: None), \
              patch.object(risk_router, "update_env", lambda values: calls.append(values)):

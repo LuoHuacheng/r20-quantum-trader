@@ -15,7 +15,7 @@ from r20_backend.exchanges import ExchangeCapabilityError
 from r20_backend.exchanges.gate import GateAdapter
 
 
-_LISTING_PATCHES = []
+_MODULE_PATCHES = []
 
 def setUpModule():
     """封闭三律（同 fa417ee）：宿主 .env 注入的 ambient R20_* 旗标
@@ -42,7 +42,25 @@ def setUpModule():
                        lambda *a, **k: _listing.ListingCheck(
                            ok=True, reason=None, checked_at="", source="cache"))
     _lp.start()
-    _LISTING_PATCHES.append(_lp)
+    _MODULE_PATCHES.append(_lp)
+
+    # 池门禁隔离：本模块验证的是路由/保护语义，不是 data/venue_routing.json 的
+    # per-venue 池配置（那是 test_venue_wiring 的题目）。该文件被 .gitignore 忽略
+    # ——ambient 缺失或 gate 池 dry_run=true 时，本模块 13 个用例会集体误报
+    # 「venue_dry_run」。此处只把 dry_run 翻成 False 并补准入币种，其余风控参数
+    # （保证金预算/max_open/置信度）原样沿用真实加载器，不改变任何夹取结果。
+    _real_pool_soft = router._load_venue_pool_soft
+
+    def _permissive_pool(venue):
+        pool = dict(_real_pool_soft(venue))
+        pool["dry_run"] = False
+        if not pool.get("assets"):
+            pool["assets"] = ["BTC"]
+        return pool
+
+    _pp = patch.object(router, "_load_venue_pool_soft", _permissive_pool)
+    _pp.start()
+    _MODULE_PATCHES.append(_pp)
 
 
 _RESTORE_FN = None
@@ -51,9 +69,9 @@ _RESTORE_FN = None
 def tearDownModule():
     if _RESTORE_FN:
         _RESTORE_FN()
-    for _p in _LISTING_PATCHES:
+    for _p in _MODULE_PATCHES:
         _p.stop()
-    _LISTING_PATCHES.clear()
+    _MODULE_PATCHES.clear()
 
 
 class TestSigner(unittest.TestCase):
@@ -339,20 +357,12 @@ class TestExternalPositionPrecheck(unittest.TestCase):
         self.assertTrue(r["ok"], r.get("detail"))
         self.assertEqual(ad.calls[1], ("leverage", "BTC", 3, "isolated"))
 
-    def _open_pool(self):
-        """隔离 ambient data/venue_routing.json：本类只验证保证金档位推导，
-        池门禁（dry_run/assets）由 test_venue_wiring 覆盖。"""
-        return patch.object(router, "_load_venue_pool_soft",
-                            lambda venue: {"assets": ["BTC"], "dry_run": False,
-                                           "max_open": 5, "margin_per_trade_usdt": 1000.0,
-                                           "min_confidence": 50.0})
-
     def test_margin_mode_derived_from_account_when_omitted(self):
         # Binance Demo 域 /fapi/v1/marginType 不可用（-1102）：调用方不传档位时
         # router 必须以账户实况为准，而不是硬编码 cross——否则必然 fail-closed 拒单
         ad = _StubAdapter()
         ad.position_margin_type = lambda inst: "isolated"
-        with self._env(), self._open_pool():
+        with self._env():
             r = router.open_protected_position(_decision(), adapter=ad, price_ref=79000.0)
         self.assertTrue(r["ok"], r.get("detail"))
         self.assertEqual(ad.calls[1], ("leverage", "BTC", 3, "isolated"))
@@ -365,7 +375,7 @@ class TestExternalPositionPrecheck(unittest.TestCase):
             raise RuntimeError("positionRisk down")
 
         ad.position_margin_type = _boom
-        with self._env(), self._open_pool():
+        with self._env():
             r = router.open_protected_position(_decision(), adapter=ad, price_ref=79000.0)
         self.assertTrue(r["ok"], r.get("detail"))
         self.assertEqual(ad.calls[1], ("leverage", "BTC", 3, "cross"))

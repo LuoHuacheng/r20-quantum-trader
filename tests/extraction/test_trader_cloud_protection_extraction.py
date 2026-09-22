@@ -22,20 +22,16 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-PRE = "447ad19"  # 本刀动工前最后提交（第八十四刀收口）
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # 同级黄金快照工具
+from _verbatim_golden import load as _golden_load, record_mode as _golden_recording, save as _golden_save  # noqa: E402
+
+GOLDEN_NAME = "cloud_protection"
 FNS = ("amend_venue_stop_loss", "_live_oco_coverage",
        "ensure_cloud_position_protection", "sync_cloud_algo_stop")
 INJ = {"amend_venue_stop_loss": (),
        "_live_oco_coverage": ("_float_or_zero",),
        "ensure_cloud_position_protection": ("okx_rest", "_live_oco_coverage"),
        "sync_cloud_algo_stop": ("okx_rest",)}
-
-
-def _old_tree() -> ast.Module:
-    r = subprocess.run(["git", "show", f"{PRE}:scripts/ai_factor_trader.py"],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return ast.parse(r.stdout)
 
 
 def _get_func(tree: ast.Module, name: str) -> ast.FunctionDef:
@@ -50,18 +46,31 @@ def _body_dump(fn: ast.FunctionDef) -> str:
 
 
 class CloudProtectionVerbatimTest(unittest.TestCase):
-    def test_moved_bodies_match_pre_extraction_verbatim(self):
-        old = _old_tree()
+    def test_moved_bodies_match_recorded_baseline(self):
+        """与**录制基线**逐字（零归一规则）；注入项仍是声明的 kw-only 集合。
+
+        基线原本是 `git show 447ad19:scripts/ai_factor_trader.py`（搬运前文件）—— 函数在
+        搬走后被后续提交有意改过（aa6d4e0「多所挂单展示」给云端保护加了多所/沙盒
+        兼容分支）后 one-shot 基线不可能再成立，改为录制式快照（见
+        tests/extraction/_verbatim_golden.py）。
+        """
         new = ast.parse((ROOT / "scripts/trader/cloud_protection.py").read_text(encoding="utf-8"))
+        current = {fn: {"args": [a.arg for a in _get_func(new, fn).args.args],
+                        "body": _body_dump(_get_func(new, fn))} for fn in FNS}
+        if _golden_recording():
+            _golden_save(GOLDEN_NAME, current)
+            self.skipTest(f"已重录 {GOLDEN_NAME} 黄金快照")
+        gold = _golden_load(GOLDEN_NAME)
         for fn in FNS:
             with self.subTest(fn=fn):
-                o, n = _get_func(old, fn), _get_func(new, fn)
-                self.assertEqual([a.arg for a in o.args.args],
-                                 [a.arg for a in n.args.args])
+                n = _get_func(new, fn)
+                self.assertIn(fn, gold, f"{GOLDEN_NAME} 快照缺 {fn}（请重录）")
+                self.assertEqual(gold[fn]["args"], current[fn]["args"],
+                                 f"{fn} 形参表变了——抽取注入形状被改动")
                 self.assertEqual([a.arg for a in n.args.kwonlyargs], list(INJ[fn]),
                                  f"{fn} 注入项不是声明的 kw-only 集合")
-                self.assertEqual(_body_dump(o), _body_dump(n),
-                                 f"{fn} 与抽取前**不再是同一实现**")
+                self.assertEqual(gold[fn]["body"], current[fn]["body"],
+                                 f"{fn} 与录制基线**不再是同一实现**")
 
     def test_shells_are_def_with_lazy_same_name_injection(self):
         tree = ast.parse((ROOT / "scripts/ai_factor_trader.py").read_text(encoding="utf-8"))

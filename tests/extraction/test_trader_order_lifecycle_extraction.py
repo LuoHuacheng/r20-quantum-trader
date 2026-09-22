@@ -26,15 +26,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-PRE = "9dccec0"  # 本刀动工前最后提交（第八十三刀收口）
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # 同级黄金快照工具
+from _verbatim_golden import load as _golden_load, record_mode as _golden_recording, save as _golden_save  # noqa: E402
+
+GOLDEN_NAME = "order_lifecycle"
 FNS = ("clean_stale_open_orders", "reconcile_pending_orders")
-
-
-def _old_tree() -> ast.Module:
-    r = subprocess.run(["git", "show", f"{PRE}:scripts/ai_factor_trader.py"],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    return ast.parse(r.stdout)
 
 
 def _get_func(tree: ast.Module, name: str) -> ast.FunctionDef:
@@ -49,17 +45,28 @@ def _body_dump(fn: ast.FunctionDef) -> str:
 
 
 class OrderLifecycleVerbatimTest(unittest.TestCase):
-    def test_moved_bodies_match_pre_extraction_verbatim(self):
-        """含嵌套闭包的函数体必须逐字（零归一规则）。"""
-        old = _old_tree()
+    def test_moved_bodies_match_recorded_baseline(self):
+        """含嵌套闭包的函数体必须与**录制基线**逐字（零归一规则）。
+
+        基线原本是 `git show 9dccec0:scripts/ai_factor_trader.py`（搬运前文件）。但函数
+        搬走后被后续提交有意改过（aa6d4e0 等给对账链路加了多所形态兜底），one-shot
+        基线不可能再成立 —— 改为录制式快照（见 tests/extraction/_verbatim_golden.py）。
+        """
         new = ast.parse((ROOT / "scripts/trader/order_lifecycle.py").read_text(encoding="utf-8"))
+        current = {fn: {"args": [a.arg for a in _get_func(new, fn).args.args],
+                        "body": _body_dump(_get_func(new, fn))} for fn in FNS}
+        if _golden_recording():
+            _golden_save(GOLDEN_NAME, current)
+            self.skipTest(f"已重录 {GOLDEN_NAME} 黄金快照")
+        gold = _golden_load(GOLDEN_NAME)
         for fn in FNS:
             with self.subTest(fn=fn):
-                o, n = _get_func(old, fn), _get_func(new, fn)
-                self.assertEqual([a.arg for a in o.args.args],
-                                 [a.arg for a in n.args.args])
-                self.assertEqual(_body_dump(o), _body_dump(n),
-                                 f"{fn} 与抽取前**不再是同一实现**")
+                n = _get_func(new, fn)
+                self.assertIn(fn, gold, f"{GOLDEN_NAME} 快照缺 {fn}（请重录）")
+                self.assertEqual(gold[fn]["args"], current[fn]["args"],
+                                 f"{fn} 形参表变了——抽取注入形状被改动")
+                self.assertEqual(gold[fn]["body"], current[fn]["body"],
+                                 f"{fn} 与录制基线**不再是同一实现**")
                 # 嵌套闭包必须**还在**（整体随迁，不是被外提）
                 nested = {x.name for x in ast.walk(n) if isinstance(x, ast.FunctionDef)}
                 self.assertTrue(nested - {fn}, f"{fn} 的嵌套闭包没随迁")

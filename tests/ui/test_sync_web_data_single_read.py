@@ -203,8 +203,12 @@ class EndToEndSingleReadTest(unittest.TestCase):
         led = str(pathlib.Path(sync_web_data.LEDGER_JSON_FILE))
         # 先确认"我们面对的是生产目录"—— 若哪天它变成临时目录，本用例的安全
         # 假设就不再成立，应当显式知道（而不是静默地继续）。
-        self.assertTrue(str(prod).endswith("/data/dsh/home/r20/data"),
-                        f"DATA_DIR 不是预期中的生产目录: {prod}")
+        # 安全假设：DATA_DIR 必须是**真实项目目录**（生产容器或本仓 checkout），
+        # 否则"只拦写"的守卫就没有意义。原断言只认容器路径 —— 开发机上必然失败，
+        # 但两条路径下的守卫语义完全一致（写一律 PermissionError）。
+        allowed = (str(prod).endswith("/data/dsh/home/r20/data")
+                   or prod == (ROOT / "data").resolve())
+        self.assertTrue(allowed, f"DATA_DIR 既非生产目录也非本仓 data/: {prod}")
 
         real_open, seen, blocked = open, {}, []
 

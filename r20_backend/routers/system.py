@@ -168,30 +168,41 @@ def safe_platform_summary() -> str:
     —— 纯诊断字段不该拖垮整个自检接口（离线套件实测 2 例 ERROR 的真因之一）。
     降级用 `system/release/machine`（POSIX 走 `os.uname()`，零子进程）。
     """
+    def _parts() -> str:
+        try:
+            pieces = [platform.system(), platform.release(), platform.machine()]
+        except Exception:
+            return "unknown"
+        return "-".join(piece for piece in pieces if piece) or "unknown"
+
     try:
+        if platform.system() == "Darwin":
+            # macOS 上 platform.platform() **必然** fork `file -b` 探处理器型号
+            # （实测），受限环境里这就是一次注定被拦的子进程 —— 直接用零子进程组合。
+            return _parts()
         value = platform.platform()
         if value:
             return value
     except Exception:
         pass
-    try:
-        parts = [platform.system(), platform.release(), platform.machine()]
-    except Exception:
-        return "unknown"
-    return "-".join(part for part in parts if part) or "unknown"
+    return _parts()
 
 
 def update_status() -> dict[str, Any]:
+    # 一律走 app_attr 解析的 git：测试/沙箱把 `r20_backend.app.git` 换成桩之后，
+    # 这里再直呼模块级 `git` 就会绕开覆盖、真去 fork 子进程（离线护栏实测 6 次
+    # git 拦截里的大部分出自此处）。单一覆盖点 = 单一事实源。
+    git_fn = app_attr("git", git)
     try:
-        local = git(["rev-parse", "--short", "HEAD"])
-        branch = git(["branch", "--show-current"])
-        dirty = bool(git(["status", "--porcelain", "-uno"]))
+        local = git_fn(["rev-parse", "--short", "HEAD"])
+        branch = git_fn(["branch", "--show-current"])
+        dirty = bool(git_fn(["status", "--porcelain", "-uno"]))
         remote = ""
         behind = ahead = 0
         try:
-            git(["fetch", "--quiet", "origin", branch])
-            remote = git(["rev-parse", "--short", f"origin/{branch}"])
-            ahead, behind = [int(item) for item in git(["rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"]).split()]
+            git_fn(["fetch", "--quiet", "origin", branch])
+            remote = git_fn(["rev-parse", "--short", f"origin/{branch}"])
+            ahead, behind = [int(item) for item in git_fn(["rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"]).split()]
         except RuntimeError:
             pass
         return {"branch": branch, "local": local, "remote": remote, "behind": behind, "ahead": ahead, "dirty": dirty}

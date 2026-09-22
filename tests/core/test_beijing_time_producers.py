@@ -14,7 +14,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open
 
-import pytest
+try:                    # 官方 runner（unittest discover / offline_suite）走 load_tests 桥，
+    import pytest       # pytest 只是**可选**加速器；缺它时本模块必须照样可导入可跑
+except ModuleNotFoundError:  # pragma: no cover - 取决于环境是否装 pytest
+    pytest = None
 
 ROOT = Path(__file__).resolve().parents[2]
 BJ = dt.timezone(dt.timedelta(hours=8))
@@ -52,26 +55,31 @@ PRODUCER_PATHS = [
 ]
 
 
-@pytest.mark.parametrize("path", PRODUCER_PATHS)
-def test_all_datetime_producer_expressions(path):
-    """Exercise every changed expression, including migration/fallback branches."""
-    namespace = dict(datetime=FrozenDateTime, _BJ=BJ, entry={"ts": EPOCH},
-                     f=SimpleNamespace(stat=lambda: SimpleNamespace(st_mtime=EPOCH)))
-    if path.endswith(("qq_gateway_daemon.py", "cleanup_disk.py")):
-        namespace["datetime"] = SimpleNamespace(datetime=FrozenDateTime)
-    expressions = [n for n in ast.walk(tree(path)) if isinstance(n, ast.Call)
-                   and isinstance(n.func, ast.Attribute)
-                   and n.func.attr in ("isoformat", "strftime")
-                   and "datetime" in ast.unparse(n)]
-    assert expressions
-    for node in expressions:
-        value = eval(compile(ast.Expression(node), path, "eval"), namespace)
-        fmt = ast.unparse(node)
-        if "%Y%m%d_%H%M%S" in fmt:
-            assert value == "20260101_003000"
-        else:
-            assert value == EXPECTED
-            assert dt.datetime.fromisoformat(value).timestamp() == EPOCH
+def test_all_datetime_producer_expressions():
+    """Exercise every changed expression, including migration/fallback branches.
+
+    原先用 @pytest.mark.parametrize 铺开 PRODUCER_PATHS —— 那让本模块**导入期**就硬
+    依赖 pytest（缺 pytest 时 unittest discover 直接 ImportError，一条都跑不到）。
+    改成函数内显式循环：语义逐条等价，unittest / pytest 两边都照跑。
+    """
+    for path in PRODUCER_PATHS:
+        namespace = dict(datetime=FrozenDateTime, _BJ=BJ, entry={"ts": EPOCH},
+                         f=SimpleNamespace(stat=lambda: SimpleNamespace(st_mtime=EPOCH)))
+        if path.endswith(("qq_gateway_daemon.py", "cleanup_disk.py")):
+            namespace["datetime"] = SimpleNamespace(datetime=FrozenDateTime)
+        expressions = [n for n in ast.walk(tree(path)) if isinstance(n, ast.Call)
+                       and isinstance(n.func, ast.Attribute)
+                       and n.func.attr in ("isoformat", "strftime")
+                       and "datetime" in ast.unparse(n)]
+        assert expressions, f"{path} 里没有找到时间生产者表达式"
+        for node in expressions:
+            value = eval(compile(ast.Expression(node), path, "eval"), namespace)
+            fmt = ast.unparse(node)
+            if "%Y%m%d_%H%M%S" in fmt:
+                assert value == "20260101_003000", f"{path}: {fmt} -> {value}"
+            else:
+                assert value == EXPECTED, f"{path}: {fmt} -> {value}"
+                assert dt.datetime.fromisoformat(value).timestamp() == EPOCH
 
 
 def test_failover_epoch_preserved():
@@ -222,7 +230,8 @@ def load_tests(loader, standard_tests, pattern):
         arg_sets = [{"path": p} for p in PRODUCER_PATHS] if "path" in params else [{}]
         for kwargs in arg_sets:
             def run(fn=fn, kwargs=kwargs, params=params):
-                mp = pytest.MonkeyPatch() if "monkeypatch" in params else None
+                mp = (pytest.MonkeyPatch()
+                      if ("monkeypatch" in params and pytest is not None) else None)
                 try:
                     if mp is not None:
                         fn(monkeypatch=mp, **kwargs)

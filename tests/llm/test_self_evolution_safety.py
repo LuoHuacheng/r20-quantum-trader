@@ -36,6 +36,10 @@ class SelfEvolutionSafetyTests(unittest.TestCase):
             "prompt_library": {"active_profile": Mock(), "apply_module_layout": Mock()},
             "r20_gateway.telemetry": {"ModelCallTelemetry": Mock()},
             "qq_notifier": {"notify_evolution_report": Mock()},
+            # 引擎按脚本语义裸 import 兄弟模块（sys.path[0]=scripts/）；本用例用
+            # 隔离加载器 exec，必须与 instrument_pool/prompt_library 一样打桩，
+            # 否则 ModuleNotFoundError（13 例集体报错）。
+            "llm_credentials": {"get_cpa_client_config": Mock()},
         }.items():
             module = ModuleType(name)
             module.__dict__.update(attrs)
@@ -62,7 +66,10 @@ class SelfEvolutionSafetyTests(unittest.TestCase):
         def guarded_open(original):
             def checked(file, *args, **kwargs):
                 if not isinstance(file, int):
-                    self.assertTrue(Path(file).resolve().is_relative_to(self.root), str(file))
+                    # 两侧都 resolve：macOS 的 /var 是 /private/var 的符号链接
+                    self.assertTrue(
+                        Path(file).resolve().is_relative_to(Path(self.root).resolve()),
+                        str(file))
                 return original(file, *args, **kwargs)
             return checked
         self.start_patch(patch("builtins.open", guarded_open(builtins.open)))

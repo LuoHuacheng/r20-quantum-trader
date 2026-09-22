@@ -67,7 +67,9 @@ class Sandbox(unittest.TestCase):
             if isinstance(path, int):
                 return
             resolved = Path(path).resolve()
-            if not resolved.is_relative_to(self.root):
+            # 两侧都 resolve：macOS 的 /var 是指向 /private/var 的符号链接，
+            # 拿未解析的临时根比对 resolve() 后的路径会误杀全部沙盒内 IO。
+            if not resolved.is_relative_to(Path(self.root).resolve()):
                 raise AssertionError(f"Non-sandbox file access blocked: {resolved}")
 
         def guarded(fn):

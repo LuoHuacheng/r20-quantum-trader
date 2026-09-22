@@ -153,16 +153,22 @@ class PromptModuleTests(unittest.TestCase):
         self.assertNotIn("可编辑规则模块摘要",compiled)
 
 
+#: 可枚举文件描述符的目录：Linux 是 /proc/self/fd，macOS/BSD 是 /dev/fd
+#: （旧实现硬编码 /proc —— macOS 上直接 FileNotFoundError，用例永远跑不起来）。
+_FD_DIR = next((d for d in ("/proc/self/fd", "/dev/fd") if os.path.isdir(d)), None)
+
+
+@unittest.skipUnless(_FD_DIR, "无可枚举文件描述符的目录（/proc/self/fd 或 /dev/fd）")
 class GatewayFDTests(unittest.TestCase):
     def test_connections_are_closed(self):
         import gc
         with tempfile.TemporaryDirectory() as tmp:
             store=GatewayStore(Path(tmp)/"gateway.db")
             gc.collect()
-            before=len(os.listdir("/proc/self/fd"))
+            before=len(os.listdir(_FD_DIR))
             for i in range(150): store.set_state("x",str(i)); store.get_state("x"); store.stats()
             gc.collect()
-            after=len(os.listdir("/proc/self/fd"))
+            after=len(os.listdir(_FD_DIR))
             self.assertLessEqual(after-before,10)
 
 

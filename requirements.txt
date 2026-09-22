@@ -1,4 +1,4 @@
-﻿# R20 Quantum Trader Dependencies
+# R20 Quantum Trader Dependencies
 # Pinned for strict reproducibility & zero supply chain drift
 
 fastapi==0.141.1
@@ -10,5 +10,8 @@ numpy>=1.24.0,<3.0.0
 openpyxl>=3.1.0
 cryptography>=42.0.0
 httpx==0.28.1
+# QQ 通道（r20_backend/qq_gateway_daemon.py、qq_bind.py）的生产依赖；此前漏声明，
+# 裸仓库 + requirements.txt 安装后该功能 ImportError、tests/venues 25 例连带报错。
+websockets>=12.0,<19.0
 python-multipart>=0.0.9
 pydantic>=2.7.0,<3.0.0

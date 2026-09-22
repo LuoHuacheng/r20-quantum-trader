@@ -146,6 +146,41 @@ def git(command: list[str]) -> str:
     return result.stdout.strip()
 
 
+def safe_git(git_fn, command: list[str]) -> str:
+    """只读 git 查询的**降级壳**：拿不到就返回空串，绝不把异常抛给调用方。
+
+    `/api/v1/admin/about` 是控制面自检接口，仓库信息只是装饰性字段：git 缺失、
+    工作区不是仓库（tar 部署）、或子进程被执行护栏拦下时，它必须照常 200。
+    `update_status()` 一直有兜底，唯独 `repository.branch/commit` 裸奔 ——
+    离线套件实测被拦 spawn 时 `/about` 直接 500（2 例 ERROR）。
+    """
+    try:
+        return git_fn(command)
+    except Exception:
+        return ""
+
+
+def safe_platform_summary() -> str:
+    """平台摘要，带**不 spawn** 的降级分支。
+
+    `platform.platform()` 在 macOS 上会 fork `file -b` 去探处理器型号：受限环境
+    （子进程被拦、只读容器、无 /usr/bin/file）里异常会直接穿透 `/api/v1/admin/about`
+    —— 纯诊断字段不该拖垮整个自检接口（离线套件实测 2 例 ERROR 的真因之一）。
+    降级用 `system/release/machine`（POSIX 走 `os.uname()`，零子进程）。
+    """
+    try:
+        value = platform.platform()
+        if value:
+            return value
+    except Exception:
+        pass
+    try:
+        parts = [platform.system(), platform.release(), platform.machine()]
+    except Exception:
+        return "unknown"
+    return "-".join(part for part in parts if part) or "unknown"
+
+
 def update_status() -> dict[str, Any]:
     try:
         local = git(["rev-parse", "--short", "HEAD"])
@@ -405,15 +440,16 @@ def admin_about(
     store = GatewayStore(GATEWAY_DB_PATH)
     gw_status = {"version": GATEWAY_VERSION, "running": gw_running, "pid": pid or None, "stats": store.stats(), "event_health": store.event_health(), "scheduler": scheduler_snapshot(store)}
     current_v = get_version()
+    _git_fn = app_attr("git", git)
     return {
         "product": {"name": APP_NAME, "version": current_v, "control_plane": "R20 Gateway Runtime", "gateway_version": GATEWAY_VERSION},
-        "runtime": {"python": platform.python_version(), "platform": platform.platform(), "backend_pid": os.getpid(), "gateway": gw_status},
+        "runtime": {"python": platform.python_version(), "platform": safe_platform_summary(), "backend_pid": os.getpid(), "gateway": gw_status},
         "components": [
             {"name": "FastAPI Control Plane", "version": current_v},
             {"name": "Gateway Event Runtime", "version": GATEWAY_VERSION},
             {"name": "SQLite", "version": __import__("sqlite3").sqlite_version},
         ],
-        "repository": {"url": "https://github.com/555cute/r20-quantum-trader", "branch": app_attr("git", git)(["branch", "--show-current"]), "commit": app_attr("git", git)(["rev-parse", "--short", "HEAD"])},
+        "repository": {"url": "https://github.com/555cute/r20-quantum-trader", "branch": safe_git(_git_fn, ["branch", "--show-current"]), "commit": safe_git(_git_fn, ["rev-parse", "--short", "HEAD"])},
         "update": app_attr("update_status", update_status)(),
         "security": {"authentication": "PBKDF2-SHA256 + server-side sessions", "session_hours": 12, "plugin_policy": "builtin-only", "prompt_transport": "python-direct"},
     }

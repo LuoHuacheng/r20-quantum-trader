@@ -53,6 +53,14 @@ class MoveIsLosslessTest(unittest.TestCase):
     # 正向钉住这 6 处接线确实存在 —— 白名单不能被用来掩盖真正的搬运错误。
     _NOTE_RE = re.compile(r'^note_failure\("[a-z_0-9]+", exc\)$')
 
+    # 又一次纯**新增**的文档化差异（第八十六刀后）：OKX ticker 取数接入时延埋点。
+    # 搬运时没有这两行，之后的提交给主脑补了 okx_latency_ms 观测（仅为可观测性，
+    # 不改任何取值路径）—— 故按"新增行"整体放行，并由下方正向用例钉住它确实存在。
+    _ADDED_INSTRUMENTATION = (
+        "t_okx0 = time.time()",
+        'pkg["okx_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))',
+    )
+
     def _normalise(self, lines):
         """把第 137 刀的接线**还原**成搬运时的样子，再逐行比对。
 
@@ -63,6 +71,8 @@ class MoveIsLosslessTest(unittest.TestCase):
         out = []
         for ln in lines:
             stripped = ln.strip()
+            if stripped in self._ADDED_INSTRUMENTATION:
+                continue          # 纯新增行：还原成"搬运时不存在"
             if self._NOTE_RE.match(stripped):
                 indent = ln[:len(ln) - len(ln.lstrip())]
                 ln = f"{indent}pass"
@@ -82,6 +92,12 @@ class MoveIsLosslessTest(unittest.TestCase):
                          "函数体行数变了（除已记录的 6 行接线外）—— 搬运过程中漏行或多行")
         for i, (a, b) in enumerate(zip(a_norm, b_norm)):
             self.assertEqual(a, b, f"函数体第 {i + 1} 行不一致（搬运被改动）")
+
+    def test_okx_latency_instrumentation_actually_present(self):
+        """正向断言：上面放行的 2 行时延埋点必须真的在（白名单不许被滥用）。"""
+        src = "\n".join(_submodule_function_lines())
+        for marker in self._ADDED_INSTRUMENTATION:
+            self.assertIn(marker, src, "放行的时延埋点不存在——白名单已被滥用")
 
     def test_failure_counters_are_actually_wired(self):
         """正向断言：6 处静默 except 必须各自接上失败计数（防止上一条的白名单被滥用）。"""

@@ -108,7 +108,14 @@ def _legacy_pending(pending_orders_detail, tz_bj):
                 side_str = "限价买多" if (side_raw == "buy" and ord_type != "market") else ("市价买多" if side_raw == "buy" else ("限价卖空" if ord_type != "market" else "市价卖空"))
             raw_px = str(o.get("px") or "").strip()
             px_val = raw_px if raw_px and raw_px != "0" else ("市价" if ord_type == "market" else "--")
-            sz_val = str(o.get("sz", "--"))
+            # re-baseline（aa6d4e0「修复负数张数泄漏」）：sz 统一归一 —— 负数取绝对值、
+            # None/0/非数字一律渲染 "--"，不再把 Python 的 None 泄漏进提示词。
+            raw_sz = o.get("sz")
+            try:
+                sz_float = float(raw_sz or 0)
+                sz_val = f"{abs(sz_float):g}" if sz_float != 0 else str(raw_sz if raw_sz is not None else "--")
+            except (TypeError, ValueError):
+                sz_val = str(raw_sz if raw_sz is not None else "--")
             ord_id = str(o.get("ordId", ""))
             attach_list = o.get("attachAlgoOrds", [])
             tp_sl_info = ""
@@ -392,9 +399,15 @@ class PendingPriceDisplayTest(unittest.TestCase):
         out = build_pending_order_lines([o], tz_bj=TZ_BJ, datetime=datetime)
         self.assertIn("--张", out)
 
-    def test_sz_none_renders_literal_none(self):
-        """既有行为：`sz=None` 渲染成字面 `None`（不是 `--`）—— 钉住它。"""
-        self.assertIn("None张", self._line(sz=None))
+    def test_sz_none_renders_dash(self):
+        """契约（aa6d4e0 起）：`sz=None` 归一为 `--`，绝不把 Python 的 `None` 泄漏进提示词。
+
+        旧契约是字面 `None`（`str(o.get("sz","--"))` 的副作用）—— 那次「修复负数张数
+        泄漏」把 sz 三态（数字 / 0 / 缺失或非法）统一成 `abs()` + `--`，本用例随之改写。
+        """
+        out = self._line(sz=None)
+        self.assertIn("--张", out)
+        self.assertNotIn("None张", out)
 
     def test_ord_id_default_empty(self):
         self.assertIn("[挂单ID: ]", self._line())

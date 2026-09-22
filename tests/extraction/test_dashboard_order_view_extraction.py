@@ -36,7 +36,25 @@ TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 
 def _legacy(orders_data, pending_orders_list, *, tz_beijing, datetime):
-    """搬走前 update_cache_cycle 里的内联挂单遍历（逐字原样）。"""
+    """搬走前 update_cache_cycle 里的内联挂单遍历（逐字原样 + 已同步的增量）。"""
+    # re-baseline（aa6d4e0「多所挂单展示」）：产物新增 account_mode/environment 两字段，
+    # 由当前 OKX 环境档推导；legacy 副本同步，否则 12k 随机对拍必分叉。
+    try:
+        from scripts.okx_runtime import current_environment
+        _okx_env = current_environment()
+        _acc_mode = "DEMO" if _okx_env.simulated else "LIVE"
+        _env_mode = _okx_env.mode.lower()
+    except Exception:
+        _acc_mode, _env_mode = "DEMO", "demo"
+    # re-baseline（aa6d4e0「多所挂单展示」）：产物新增 account_mode/environment 两字段，
+    # 由当前 OKX 环境档推导；legacy 副本同步，否则 12k 随机对拍必分叉。
+    try:
+        from scripts.okx_runtime import current_environment
+        _okx_env = current_environment()
+        _acc_mode = "DEMO" if _okx_env.simulated else "LIVE"
+        _env_mode = _okx_env.mode.lower()
+    except Exception:
+        _acc_mode, _env_mode = "DEMO", "demo"
     if isinstance(orders_data, list):
         for o in orders_data:
             c_ts = int(o.get("cTime", 0) or 0) / 1000.0
@@ -92,7 +110,8 @@ def _legacy(orders_data, pending_orders_list, *, tz_beijing, datetime):
                 "px": px_display, "sz": str(o.get("sz", "--")),
                 "cTime": str(o.get("cTime", "")), "time": c_time_str,
                 "state": str(o.get("state", "live")),
-                "tp_px": tp_px, "sl_px": sl_px
+                "tp_px": tp_px, "sl_px": sl_px,
+                "account_mode": _acc_mode, "environment": _env_mode
             })
     return None
 

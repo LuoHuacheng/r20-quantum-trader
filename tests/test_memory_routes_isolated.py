@@ -57,7 +57,10 @@ class MemoryRouteTests(unittest.IsolatedAsyncioTestCase):
                     path = Path(file).resolve()
                     # Runtime file IO is restricted to synthetic fixtures. Python
                     # import machinery is not replaced and may read library code.
-                    if not path.is_relative_to(self.root):
+                    # 两侧都 resolve：macOS 的 /var 是指向 /private/var 的符号链接，
+                    # 拿未解析的临时根去比对 resolve() 后的路径会把全部合法 fixture
+                    # IO 误判成越界（23 例集体失败）。
+                    if not path.is_relative_to(Path(self.root).resolve()):
                         raise AssertionError(f'non-fixture file IO: {path}')
                 return original(file, *args, **kwargs)
             return checked

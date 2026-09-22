@@ -146,7 +146,10 @@ plan_local/
 data/r20_gateway.sqlite3*
 data/*.sqlite3
 
-# 崩溃转储：本机 core_pattern=core + ulimit -c unlimited ⇒ 任何崩溃都会在仓库根丢一个
-# ~190M 的 core 文件，曾被我一次 git add -A 误提交。按后缀一概忽略。
-core
-core.*
+# 崩溃转储：本机 core_pattern=core + ulimit -c unlimited ⇒ 任何崩溃都会在**仓库根**丢一个
+# ~190M 的 core 文件，曾被我一次 git add -A 误提交。
+# ⚠️ 必须锚定仓根（`/core`）：裸 `core` 会连带忽略 `tests/core/` 整个目录 ——
+# 实测后果是该目录下用例文件 `git add` 直接被拒（tracked 文件也照拒），
+# 编辑永远提交不上去。
+/core
+/core.*

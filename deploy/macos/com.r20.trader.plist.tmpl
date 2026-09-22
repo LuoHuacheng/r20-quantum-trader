@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  R20 Quantum Trader · macOS LaunchAgent 模板
+
+  由 ``deploy/r20ctl.py install`` 渲染（占位符替换后写进 ~/Library/LaunchAgents/）：
+    __PYTHON__ → 仓库 venv 的解释器（找不到则回落 /usr/bin/env python3 的解析结果）
+    __ROOT__   → 仓库根目录（WorkingDirectory，脚本里的相对路径全靠它）
+    __LOG__    → logs/r20_backend.log（stdout/stderr 同址追加）
+
+  ⚠️ 只起**后端**一个进程：前端 dist 由后端 serve_vue_spa 下发，网关 worker 由
+  后端内的 r20_gateway.supervisor 托管（r20_backend/app.py）。多起一份网关会在
+  worker 里撞锁自退（实测日志 "gateway worker already running; exiting"）。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.r20.trader</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>uvicorn</string>
+    <string>r20_backend.app:app</string>
+    <string>--host</string>
+    <string>0.0.0.0</string>
+    <string>--port</string>
+    <string>8080</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__ROOT__</string>
+
+  <!-- 登录即起 + 崩溃自动重拉（用户口径：自启 + 自愈） -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- 日志与手动 nohup 启动时同址，r20-logs 直接 tail 它 -->
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>

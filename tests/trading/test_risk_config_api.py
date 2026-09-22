@@ -32,6 +32,19 @@ RISK_KEYS = set(RISK_ENV_KEYS)
 
 class RiskConfigApiTests(unittest.TestCase):
     def setUp(self):
+        # ⚠️ 生产 data/ 必须沙箱：POST /api/v1/admin/risk 会经
+        # `sync_pool_leverage_caps()` → `sync_instruments_state()` 写
+        # trading_state / factor_library_snapshot / news_sentiment —— 实测不沙箱时
+        # **真写生产文件**（内容相同但 mtime 被改写），由
+        # tests/audit/test_production_data_isolation.py::RiskApiTestModuleNeverTouchesProductionTest 守门。
+        from tests.config_sandbox import isolate_config
+        isolate_config(self)
+        # 该扇出只是"标的池变更后刷新下游"，与本用例的 API 契约无关：打桩掉，
+        # 免得每次保存都 fork 一个脚本（离线护栏会把它们全拦成噪声）。
+        import scripts.instrument_pool as _ip
+        _no_sync = __import__("unittest.mock").mock.patch.object(
+            _ip, "sync_instruments_state", lambda: None)
+        _no_sync.start(); self.addCleanup(_no_sync.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.original_auth = app_module.admin_auth
         app_module.admin_auth = AdminAuthStore(Path(self.temp.name) / "admin.db")

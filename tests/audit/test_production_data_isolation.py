@@ -341,6 +341,52 @@ class SyncInstrumentsStateNeverWritesProductionTest(unittest.TestCase):
                       "isolate_config 不再重定向 instrument_pool 的写集常量")
 
 
+class RiskApiTestModuleNeverTouchesProductionTest(unittest.TestCase):
+    """⚠️ 2026-09-22 实测泄漏：跑 `tests/trading/test_risk_config_api.py` 会真写生产
+    `data/trading_state.json` / `factor_library_snapshot.json` / `news_sentiment.json`
+    （内容相同但 mtime 被改写）—— 该文件只沙箱了 `.env` 与风控环境变量，从未调用
+    `isolate_config`，于是 POST `/api/v1/admin/risk` 触发的
+    `sync_pool_leverage_caps()` → `sync_instruments_state()` 全落在生产路径上。
+    离线护栏把这批写入拦下来，才让泄漏现身。
+
+    判据是**行为**（与本文档第 27 行同一条教训）：在子进程里跑那个测试模块，断言生产
+    文件的 (mtime_ns, size, sha256) 三元组逐一不变 —— 静态检查"有没有调 isolate_config"
+    表达不了"这条路径会不会写生产"。
+    """
+
+    #: 该模块写路径实际触及的生产文件
+    GUARDED = (
+        "data/instrument_pool.json",
+        "data/trading_state.json",
+        "data/factor_library_snapshot.json",
+        "data/news_sentiment.json",
+    )
+
+    @staticmethod
+    def _fingerprint(rel: str):
+        path = ROOT / rel
+        if not path.exists():
+            return None
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size,
+                hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_module_writes_stay_out_of_production(self):
+        import subprocess
+
+        _guard_offline()          # 必须先于任何 spawn
+        before = {rel: self._fingerprint(rel) for rel in self.GUARDED}
+        cp = subprocess.run(
+            [sys.executable, "-m", "unittest", "tests.trading.test_risk_config_api"],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=180)
+        self.assertEqual(cp.returncode, 0,
+                         f"被审计的模块自身失败：{cp.stderr[-300:]}")
+        drifted = [rel for rel in self.GUARDED
+                   if before[rel] != self._fingerprint(rel)]
+        self.assertEqual(drifted, [],
+                         "该模块的写路径落到生产 data/ 了：" + ", ".join(drifted))
+
+
 def _strip_docstrings_and_comments(src: str) -> str:
     """去掉 docstring 与 `#` 注释（保留换行以对齐行号）。
 

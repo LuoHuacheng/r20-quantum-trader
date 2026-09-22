@@ -51,12 +51,43 @@ class OfflineGuard:
                                      if stat else None)
         return result
 
+    @staticmethod
+    def _fd_directory(dir_fd):
+        """dir_fd → 它指向的目录绝对路径；解析不出 → `None`（调用方按"判不明"处理）。
+
+        ⚠️ 必须跨平台：`shutil.rmtree` 走 **fd 版**实现时，`os.remove`/`os.rmdir`
+        的 audit 事件带的是**相对名 + dir_fd**，于是每次 teardown 都会走到这里。
+        旧实现无条件 `os.readlink('/proc/self/fd/N')`：Linux 可以；**macOS 没有
+        /proc**，readlink 抛 `OSError`，而这个异常是在 **audit hook 里**抛出的 ——
+        `shutil` 把它当成"这一项删不掉"，于是 `TemporaryDirectory.cleanup` 一路
+        `ENOTEMPTY` 炸掉。离线套件实测 **716 例 ERROR 全出自这一行**。
+
+        macOS/BSD 的 `/dev/fd/N` **不是符号链接**（readlink 直接 EINVAL），
+        必须用 `fcntl.F_GETPATH` 反查路径。
+        """
+        try:
+            return Path(os.readlink(f'/proc/self/fd/{dir_fd}'))
+        except OSError:
+            pass
+        try:
+            import fcntl
+            raw = fcntl.fcntl(dir_fd, fcntl.F_GETPATH, b'\0' * 1024)
+            text = raw.split(b'\0', 1)[0].decode()
+            return Path(text) if text else None
+        except (ImportError, OSError, ValueError):
+            return None
+
     def protected(self, value, dir_fd=None):
         if not isinstance(value, (str, bytes, os.PathLike)):
             return False
         path = Path(os.fsdecode(value))
         if not path.is_absolute() and dir_fd is not None and dir_fd != -1:
-            path = Path(os.readlink(f'/proc/self/fd/{dir_fd}')) / path
+            base = self._fd_directory(dir_fd)
+            if base is None:
+                # 判不出这个 fd 指向哪 —— **不许冒充"受保护"**，更不许抛异常
+                # （抛出去就是上面 716 例 teardown 残废的成因）。
+                return False
+            path = base / path
         path = path.resolve()
         return not path.name.endswith('.lock') and any(
             path == root / '.env' or path.is_relative_to(root / 'data')

@@ -371,13 +371,13 @@ def update_cache_cycle():
     factors_list, state_data = _core_build_factors_list(
         AI_DECISIONS_FILE, STATE_JSON_FILE, FACTOR_LIBRARY_FILE, positions, timestamp_full)
     # 7. Read Ledger Lifecycle Trades for Table (阶段 2·B2 第八刀：迁至 dashboard_payload/ledger_view.py)
-    # 步2·账号范围：读取侧显式收窄到「当前账号」（include_legacy=False），并把被隐藏的
-    # 无身份旧行暂存进载荷，供 /api/all?include_legacy=1 的「显示历史遗留」开关原样放出。
+    # 步2·账号范围：读取侧显式收窄到「当前连接的交易所账号」（include_hidden=False），
+    # 并把被挡下的行暂存进载荷，供 /api/all?include_hidden=1 的开关原样放出。
     # 账号轴已在第 3 步解析（_current_accounts）；此处复用，绝不重复解析第二遍，
     # 否则同一轮刷新里两处结果若漂移，台账与基线会各说各话。
-    valid_ledger_trades, trades_table, _ledger_scope, _ledger_legacy_rows = _core_load_ledger_scoped(
+    valid_ledger_trades, trades_table, _ledger_scope, _ledger_hidden_rows = _core_load_ledger_scoped(
         LEDGER_JSON_FILE, WORKSPACE_DIR, LEDGER_AUTOSYNC_ENABLED, reset_time_str,
-        current_accounts=_current_accounts, include_legacy=False)
+        current_accounts=_current_accounts, include_hidden=False)
     # 8-10. 本地读取（结构优化阶段 2·B2 第六刀：迁至 dashboard_payload/local_reads.py）
     _local = _core_load_local_reads(
         REPORT_JSON_FILE, SNAPSHOTS_JSON_FILE, NEWS_SENTIMENT_FILE, AI_LAST_PROMPT_FILE,
@@ -444,9 +444,9 @@ def update_cache_cycle():
         total_cum_realized_pnl=total_cum_realized_pnl, total_eq=total_eq, total_pos_upl=total_pos_upl,
         trades_table=trades_table, upl_acc=upl_acc,
     )
-    # 步2·范围披露与遗留行暂存（内部键，slim 会转成 _meta.ledger_scope 并摘掉大数组）
+    # 步2·范围披露与隐藏行暂存（内部键，slim 会转成 _meta.ledger_scope 并摘掉大数组）
     CACHE_DATA["_ledger_scope"] = _ledger_scope
-    CACHE_DATA["_ledger_legacy_rows"] = _ledger_legacy_rows
+    CACHE_DATA["_ledger_hidden_rows"] = _ledger_hidden_rows
     try:
         from r20_backend.llm_manager import get_active_llm_runtime
         active_llm_info = get_active_llm_runtime()
@@ -534,35 +534,36 @@ start_dashboard_background_worker()
 # /favicon.svg 四条路由）搬到 r20_backend/web_shell.py 与 routers/dashboard.py。
 # 本文件自此是**纯库**：提供实现，不持有 app。
 
-def _with_legacy_trades(data: dict, cap: int) -> dict:
-    """把被账号范围挡下的「无身份旧行」并回 trades（``?include_legacy=1`` 用）。
+def _with_hidden_trades(data: dict, cap: int) -> dict:
+    """把被账号范围挡下的行并回 trades（``?include_hidden=1`` 用）。
 
-    浅拷贝，绝不改缓存本体；合并后按收盘时间重排并重新截断，避免遗留行把上限吃满。
+    浅拷贝，绝不改缓存本体；合并后按收盘时间重排并重新截断，避免被挡下的行把上限吃满。
     """
-    legacy = data.get("_ledger_legacy_rows")
-    if not legacy:
+    hidden = data.get("_ledger_hidden_rows")
+    if not hidden:
         return data
     out = dict(data)
-    merged = list(data.get("trades") or []) + [r for r in legacy if isinstance(r, dict)]
+    merged = list(data.get("trades") or []) + [r for r in hidden if isinstance(r, dict)]
     merged.sort(key=lambda x: str(x.get("close_time") or x.get("time") or x.get("open_time") or ""),
                 reverse=True)
     out["trades"] = merged[:cap]
     scope = dict(out.get("_ledger_scope") or {})
-    scope["include_legacy"] = True
+    scope["include_hidden"] = True
+    out["_ledger_hidden_rows"] = []
     out["_ledger_scope"] = scope
     return out
 
 
-async def get_all_data(full: bool = False, include_legacy: bool = False):
+async def get_all_data(full: bool = False, include_hidden: bool = False):
     global CACHE_DATA, LAST_CACHE_TIME
     # Return pre-warmed in-memory snapshot immediately (<1ms)
     if not CACHE_DATA or time.time() - LAST_CACHE_TIME > 5.0:
         data = await refresh_cache_if_needed(1.5)
     else:
         data = CACHE_DATA
-    # 步2·「显示历史遗留」开关：默认不出无账号归属的旧行；开时并回并保持截断上限。
-    if include_legacy:
-        data = _with_legacy_trades(data, _LEDGER_TRADES_MAX)
+    # 步2·「显示非当前账号记录」开关：默认只出当前连接账号；开时并回并保持截断上限。
+    if include_hidden:
+        data = _with_hidden_trades(data, _LEDGER_TRADES_MAX)
     # 审计#1：默认瘦身（省略项在 _meta.omitted 里逐项留痕）；full=1 与旧版逐字节一致
     payload = data if full else slim_payload(data)
     # Realtime data: strictly never cache in browser (max-age=0), micro-cache at edge for 2s with fast revalidation

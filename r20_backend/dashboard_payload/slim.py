@@ -115,11 +115,11 @@ def slim_payload(data: dict[str, Any]) -> dict[str, Any]:
         omitted["logs"] = {"kept": SLIM_LOGS, "total": len(logs)}
 
     # 步2·台账账号范围披露：``_ledger_scope`` 转正为 ``_meta.ledger_scope``（粗粒度计数，
-    # 不含 account_id/指纹）；被范围挡下的无身份旧行数组默认**不进载荷**，只在
-    # ``?include_legacy=1`` 时由 get_all_data 合并回来。默认响应既不隐藏事实，
-    # 也不把隐藏动作藏着 —— 前端据此显式提示「已隐藏 N 条无账号归属的历史行」。
+    # 不含 account_id/指纹）；被范围挡下的行数组默认**不进载荷**，只在
+    # ``?include_hidden=1`` 时由 get_all_data 合并回来。默认响应既不隐藏事实，
+    # 也不把隐藏动作藏着 —— 前端据此显式提示隐藏了多少条、以及为什么。
     _ledger_scope_meta = out.pop("_ledger_scope", None)
-    out.pop("_ledger_legacy_rows", None)
+    out.pop("_ledger_hidden_rows", None)
 
     meta = dict(out.get("_meta") or {})
     meta.update({

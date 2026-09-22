@@ -28,32 +28,35 @@ const { t } = useI18n();
 const toast = useToast();
 
 /**
- * 步3·账号范围：`trades` 已由后端收窄到「当前账号」（各所凭证指纹 + 环境轴三元身份）。
- * 「无账号归属」的历史遗留行默认不出现在响应里 —— 此处只负责**诚实披露**隐藏了多少条，
- * 并在用户显式打开开关时按需重取 `?include_legacy=1`（瘦身会摘掉遗留行数组，
+ * 步3·账号范围：`trades` 已由后端收窄到**当前连接的交易所账号**
+ * （各所凭证指纹 + 环境轴三元身份）。换过 key / 换过环境 / 该所已未连接 / 无账号归属的行
+ * 默认不出现在响应里 —— 此处只负责**诚实披露**隐藏了多少条、为什么，
+ * 并在用户显式打开开关时按需重取 `?include_hidden=1`（瘦身会摘掉被挡下的行数组，
  * 所以不能用本地缓存拼，必须重新取）。
  */
-const showLegacy = ref<boolean>(false);
-const legacyRows = ref<any[]>([]);
+const showHidden = ref<boolean>(false);
+const hiddenRows = ref<any[]>([]);
 const ledgerScope = computed<Record<string, any>>(
   () => (store.data as any)?._meta?.ledger_scope || {});
+const hiddenTotal = computed<number>(() => Number(ledgerScope.value?.hidden) || 0);
+const hiddenForeign = computed<number>(() => Number(ledgerScope.value?.hidden_foreign) || 0);
 const hiddenLegacy = computed<number>(() => Number(ledgerScope.value?.hidden_legacy) || 0);
 
 const scopedTrades = computed<any[]>(() => (store.data as any)?.trades || []);
 const all = computed<any[]>(() =>
-  showLegacy.value && legacyRows.value.length ? legacyRows.value : scopedTrades.value);
+  showHidden.value && hiddenRows.value.length ? hiddenRows.value : scopedTrades.value);
 
-async function toggleLegacy(next: boolean) {
-  showLegacy.value = next;
+async function toggleHidden(next: boolean) {
+  showHidden.value = next;
   if (!next) {
-    legacyRows.value = [];
+    hiddenRows.value = [];
     return;
   }
   try {
-    const resp = await get<any>(`/api/all?include_legacy=1&_t=${Date.now()}`);
-    legacyRows.value = resp?.trades || [];
+    const resp = await get<any>(`/api/all?include_hidden=1&_t=${Date.now()}`);
+    hiddenRows.value = resp?.trades || [];
   } catch (e: any) {
-    legacyRows.value = [];
+    hiddenRows.value = [];
     toast.err(t('dash.ledger.scope.loadFailed'));
   } finally {
     page.value = 1;
@@ -237,9 +240,9 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
         >
           {{ t('dash.ledger.countRecords', undefined, { a: filtered.length, b: all.length }) }}
         </span>
-        <!-- 账号范围披露 + 历史遗留开关（隐藏数量来自 _meta.ledger_scope，粗粒度、不含指纹） -->
+        <!-- 账号范围披露 + 非当前账号开关（计数来自 _meta.ledger_scope，粗粒度、不含指纹） -->
         <label
-          v-if="hiddenLegacy > 0 || showLegacy"
+          v-if="hiddenTotal > 0 || showHidden"
           class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 border text-3xs font-mono cursor-pointer select-none"
           style="background-color: var(--surface-2); border-color: var(--line-1); color: var(--ink-3)"
           :title="t('dash.ledger.scope.hint')"
@@ -247,11 +250,11 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
           <input
             type="checkbox"
             class="h-3 w-3 accent-[var(--accent)]"
-            :checked="showLegacy"
-            @change="toggleLegacy(($event.target as HTMLInputElement).checked)"
+            :checked="showHidden"
+            @change="toggleHidden(($event.target as HTMLInputElement).checked)"
           />
-          <span>{{ t('dash.ledger.scope.showLegacy') }}</span>
-          <span v-if="!showLegacy && hiddenLegacy > 0">· {{ t('dash.ledger.scope.hidden', undefined, { n: hiddenLegacy }) }}</span>
+          <span>{{ t('dash.ledger.scope.showHidden') }}</span>
+          <span v-if="!showHidden && hiddenTotal > 0">· {{ t('dash.ledger.scope.hidden', undefined, { n: hiddenTotal }) }}</span>
         </label>
         <span class="hidden md:inline text-3xs text-[var(--ink-3)]">
           · {{ t('dash.ledger.desc') }}

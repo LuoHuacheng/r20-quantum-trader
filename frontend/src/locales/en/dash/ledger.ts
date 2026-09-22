@@ -143,11 +143,11 @@ export const enLedger = {
   scaleOutBadge: 'Scale-Out · Breakeven Running',
   scaleOutShort: 'Scale-Out',
   scaleOutTitle: 'First batch profit locked, remaining position guarded by breakeven stop',
-  // ── step 3: ledger account-scope disclosure (how many legacy rows are hidden) ──
+  // ── step 3: ledger account-scope disclosure (current connected exchange account only) ──
   scope: {
-    showLegacy: 'Show legacy rows',
+    showHidden: 'Show non-current-account rows',
     hidden: '{n} hidden',
-    hint: 'The ledger only shows trades of the current account (per-venue credentials + environment axis). Legacy rows with no account attribution are hidden by default; tick to show them as-is — nothing was deleted, they just no longer impersonate the current account.',
-    loadFailed: 'Failed to load legacy rows',
+    hint: 'The ledger only shows trades of the currently connected exchange accounts (per-venue credential fingerprint + environment axis). Rows from a rotated API key, another environment, a venue that is no longer connected, or with no account attribution are hidden by default; tick to show them as-is — nothing was deleted, they just no longer impersonate the current account.',
+    loadFailed: 'Failed to load non-current-account rows',
   },
 };

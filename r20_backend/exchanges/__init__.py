@@ -14,7 +14,8 @@
 | `gate.py` | Gate.io V4 永续只读行情适配器 |
 | `okx.py` | OKX V5 公共行情只读适配器 |
 | `env_profiles.py` | `(venue, environment)` → 端点档单一入口（US-001） |
-| `identity.py` | `AccountKey` 三元身份 (venue, environment, credential fingerprint)（US-002） |
+| `identity.py` | `AccountKey` 三元身份 (venue, environment, credential fingerprint)（US-002）；`account_id()` 台账账号身份串、`UNKNOWN_LEGACY_ACCOUNT` 历史行哨兵 |
+| `accounts.py` | `current_venue_accounts()` —— 各所「当前账号」身份解析（只含凭证确实存在的所；写入侧与台账读取侧的唯一事实源） |
 | `registry.py` | venue 注册表 + 执行门禁 `require_execution()`（双轴开关，US-002） |
 | `diagnostics.py` | 场所连通性诊断 |
 | `listing.py` | 上币/交易对目录读取 |

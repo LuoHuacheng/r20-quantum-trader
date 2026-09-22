@@ -9,13 +9,19 @@ import json
 import os
 import time
 
+from r20_backend.dashboard_payload.account_scope import (
+    UNKNOWN_LEGACY_ACCOUNT,
+    filter_in_scope,
+    row_account_id,
+    scope_summary,
+)
 from r20_backend.time_utils import beijing_text, parse_beijing
 from scripts.evolution.observability import (
     classify_snapshot_observability,
     prune_snapshot,
 )
 
-__all__ = ["load_ledger_lifecycle_trades", "LEDGER_TRADES_MAX"]
+__all__ = ["load_ledger_lifecycle_trades", "load_ledger_scoped", "LEDGER_TRADES_MAX"]
 
 #: 台账视图一次下发的**最大逐笔行数**（唯一事实源）。
 #:
@@ -127,8 +133,18 @@ def classify_trade_observability(trade: dict, snap: dict | None = None) -> str:
     return "NONE"
 
 
-def load_ledger_lifecycle_trades(ledger_file, workspace_dir, autosync_enabled, reset_time_str):
+def load_ledger_scoped(ledger_file, workspace_dir, autosync_enabled, reset_time_str,
+                       current_accounts=None, include_legacy=False):
     """读取台账并筛出 reset_time 之后（或仍 holding）的生命周期成交。
+
+    返回 ``(valid, table, scope, legacy_rows)``（步2 起）：
+
+    - current_accounts: venue -> account_id（见 exchanges/accounts.py）。None = 无账号轴信息，
+      此时**不做场所范围过滤**，只按 include_legacy 处理「无身份」行。
+    - include_legacy: 是否放出「无账号归属」的历史行（迁移前旧行）。默认策略由调用方定。
+    - scope: 粗粒度计数（不含任何 account_id / 指纹），给前端显式披露隐藏了多少行。
+    - legacy_rows: 因「无身份」被隐藏的行（供前端的「显示历史遗留」开关原样放出），
+      include_legacy=True 时为空。这些行**不做开仓快照补挂**（无身份的行本就无从因果对齐）。
 
     原样搬自 update_cache_cycle 第 7 段（52 行）。三个注入项都有讲究：
     - ledger_file：被测试 patch；
@@ -185,6 +201,17 @@ def load_ledger_lifecycle_trades(ledger_file, workspace_dir, autosync_enabled, r
         t_time = beijing_text(t.get("time"))
         if (c_time and c_time >= beijing_text(reset_time_str)) or (o_time and o_time >= beijing_text(reset_time_str)) or (t_time and t_time >= beijing_text(reset_time_str)) or t.get("status") == "holding":
             valid_ledger_trades.append(t)
+
+    # 步2·账号范围收口：先按「当前账号」收窄，再截断。顺序不可颠倒 ——
+    # 否则非当前账号的行会先吃掉 60 条上限，当前账号的行反而被挤掉。
+    _pre_scope = valid_ledger_trades
+    valid_ledger_trades = filter_in_scope(_pre_scope, current_accounts, include_legacy)
+    _scope = scope_summary(_pre_scope, current_accounts, include_legacy)
+    _legacy_rows = [] if include_legacy else [
+        t for t in _pre_scope
+        if isinstance(t, dict) and (
+            not row_account_id(t) or row_account_id(t) == UNKNOWN_LEGACY_ACCOUNT)
+    ]
 
     trades_table = valid_ledger_trades[:LEDGER_TRADES_MAX]
 
@@ -270,4 +297,18 @@ def load_ledger_lifecycle_trades(ledger_file, workspace_dir, autosync_enabled, r
             _t["snapshot_observability"] = classify_trade_observability(_t, pruned)
 
     # 8-10. 本地读取（结构优化阶段 2·B2 第六刀：迁至 dashboard_payload/local_reads.py）
-    return valid_ledger_trades, trades_table
+    return valid_ledger_trades, trades_table, _scope, _legacy_rows[:LEDGER_TRADES_MAX]
+
+
+def load_ledger_lifecycle_trades(ledger_file, workspace_dir, autosync_enabled, reset_time_str,
+                                 current_accounts=None, include_legacy=True):
+    """兼容壳：保留旧二维返回，供既有调用方/测试逐字使用。
+
+    ⚠️ 默认 ``include_legacy=True``（= 旧语义：不隐藏无身份行）。HTTP 层
+    （dashboard_cache.get_all_data）**显式**传 False 才是严格范围视图，
+    以免「库的默认值」悄悄决定产品口径。
+    """
+    valid, table, _scope, _legacy = load_ledger_scoped(
+        ledger_file, workspace_dir, autosync_enabled, reset_time_str,
+        current_accounts=current_accounts, include_legacy=include_legacy)
+    return valid, table

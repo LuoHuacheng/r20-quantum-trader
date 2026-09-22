@@ -794,6 +794,33 @@ def build_lifecycle_ledger():
         if _FETCH_STATUS.get(_v, {}).get("status") != "failed":
             _mark(_v, "ok", rows=len(_rows), truncated=len(_rows) >= 100)
 
+    # 台账账号身份（步1b）：三所成交 + 全部 holding 行统一落 account_id；
+    # 无身份的旧行显式回填 legacy 哨兵（绝不冒充当前账号）。
+    # 写入侧与读取侧共用 r20_backend/exchanges/accounts.py —— 两边答案必须逐字一致，
+    # 否则「属不属于当前账号」会自己和自己打架。异常一律降级为空映射（不阻塞台账刷新）。
+    try:
+        from r20_backend.exchanges.accounts import current_venue_accounts
+        from r20_backend.exchanges.identity import UNKNOWN_LEGACY_ACCOUNT
+        _venue_accounts = current_venue_accounts(env)
+    except Exception:
+        _venue_accounts = {}
+        UNKNOWN_LEGACY_ACCOUNT = "unknown_legacy"
+
+    def _stamp_account_ids(rows, venue=None):
+        for _r in rows or []:
+            if not isinstance(_r, dict):
+                continue
+            _aid = _venue_accounts.get(venue or str(_r.get("venue") or "okx"))
+            if _aid:
+                _r["account_id"] = _aid
+
+    _stamp_account_ids(trades_lifecycle)
+    _stamp_account_ids(binance_trades)
+    _stamp_account_ids(gate_trades)
+    for _t in old_trades:
+        if isinstance(_t, dict) and not str(_t.get("account_id") or "").strip():
+            _t["account_id"] = UNKNOWN_LEGACY_ACCOUNT
+
     # 聚合去重合并（按 id 去重，按 close_time 降序）
     trades_map = merge_lifecycle_trades(
         binance_trades=binance_trades,

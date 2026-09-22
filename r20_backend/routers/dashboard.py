@@ -22,12 +22,18 @@ _CANDLES_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 @router.get("/api/all")
-async def get_all_data(full: bool = Query(False, description="返回完整载荷（含全部历史明细/台账/日志）")):
+async def get_all_data(
+    full: bool = Query(False, description="返回完整载荷（含全部历史明细/台账/日志）"),
+    include_legacy: bool = Query(False, description="台账是否放出无账号归属的历史遗留行"),
+):
     """默认瘦身载荷（体积约为完整版的 1/2），省略项见响应里的 `_meta.omitted`。
 
     需要旧版逐字节一致的行为时用 `?full=1`；历史明细走 `/api/v1/cache/brain-history`。
+
+    trades 默认只含**当前账号**（各所凭证指纹 + 环境轴三元身份）的成交；
+    `?include_legacy=1` 才放出无账号维度的历史遗留行，隐藏数量见 `_meta.ledger_scope`。
     """
-    return await dash_app.get_all_data(full=full)
+    return await dash_app.get_all_data(full=full, include_legacy=include_legacy)
 
 
 @router.get("/api/overview")

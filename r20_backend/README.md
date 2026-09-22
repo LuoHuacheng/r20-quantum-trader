@@ -109,7 +109,8 @@
 | `order_view.py` | `collect_pending_order_rows` —— 在途挂单行 |
 | `collect.py` | `collect_core_account_state` —— `update_cache_cycle` **相位 1**：余额/持仓/挂单三路并发抓取 + 单项失败降级 + 「三项同时 NOT_READY ⇒ 连接方式缺失」判定 + USDT 余额解析 + 追踪器/持仓行/挂单行装配（B2 第九十四刀；段体 AST 逐字、11 项同名注入、14 项输出） |
 | `algo_protection.py` | 算法保护单视图 |
-| `ledger_view.py` | 台账视图 |
+| `ledger_view.py` | 台账视图（`load_ledger_scoped` 返回 valid/table/scope/legacy 四元；`load_ledger_lifecycle_trades` 为兼容二维壳） |
+| `account_scope.py` | 台账账号范围过滤：`in_scope` / `filter_in_scope` / `scope_summary` —— 非破坏性视图范围（无身份旧行默认隐藏、`?include_legacy=1` 放出），不含 account_id/指纹 |
 | `multi_venue.py` | 三所组合视图 |
 | `integrity_sidecars.py` | 完整性旁车并入 `source_errors`（台账同步状态 / AI 连败） |
 | `reset_state.py` | 状态重置 |

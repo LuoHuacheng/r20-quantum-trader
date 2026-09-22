@@ -6,6 +6,8 @@
 import { computed, ref, watch } from 'vue';
 import { Download, ScrollText, History, Landmark, Zap } from 'lucide-vue-next';
 import { useDashboardStore } from '../../stores/dashboard';
+import { useVenueAccountsStore } from '../../stores/venueAccounts';
+import { get } from '../../api/http';
 import DataGate from '../../components/dashboard/DataGate.vue';
 import { useI18n } from '../../composables/useI18n';
 import { fmtNum, fmtSigned, fmtPct, fmtPrice, arrow, dirClass, cleanReason, fmtDate, fmtDateTime } from '../../utils/format';
@@ -21,15 +23,49 @@ import LedgerDrawer from '../../components/dashboard/LedgerDrawer.vue';
 import { useToast } from '../../composables/useToast';
 
 const store = useDashboardStore();
+const venueStore = useVenueAccountsStore();
 const { t } = useI18n();
 const toast = useToast();
 
-const all = computed<any[]>(() => (store.data as any)?.trades || []);
+/**
+ * 步3·账号范围：`trades` 已由后端收窄到「当前账号」（各所凭证指纹 + 环境轴三元身份）。
+ * 「无账号归属」的历史遗留行默认不出现在响应里 —— 此处只负责**诚实披露**隐藏了多少条，
+ * 并在用户显式打开开关时按需重取 `?include_legacy=1`（瘦身会摘掉遗留行数组，
+ * 所以不能用本地缓存拼，必须重新取）。
+ */
+const showLegacy = ref<boolean>(false);
+const legacyRows = ref<any[]>([]);
+const ledgerScope = computed<Record<string, any>>(
+  () => (store.data as any)?._meta?.ledger_scope || {});
+const hiddenLegacy = computed<number>(() => Number(ledgerScope.value?.hidden_legacy) || 0);
+
+const scopedTrades = computed<any[]>(() => (store.data as any)?.trades || []);
+const all = computed<any[]>(() =>
+  showLegacy.value && legacyRows.value.length ? legacyRows.value : scopedTrades.value);
+
+async function toggleLegacy(next: boolean) {
+  showLegacy.value = next;
+  if (!next) {
+    legacyRows.value = [];
+    return;
+  }
+  try {
+    const resp = await get<any>(`/api/all?include_legacy=1&_t=${Date.now()}`);
+    legacyRows.value = resp?.trades || [];
+  } catch (e: any) {
+    legacyRows.value = [];
+    toast.err(t('dash.ledger.scope.loadFailed'));
+  } finally {
+    page.value = 1;
+  }
+}
 const perf = computed<any>(() => (store.data as any)?.performance || {});
 
 /* —— 筛选状态 —— */
 const fVenue = ref<string>('all');
-const fMode = ref<'all' | 'live' | 'demo'>('all');
+// 步3：默认跟随当前账户环境（venueAccounts 持久化在 localStorage），不再默认 'all'
+// —— 「全部账户」会把 demo 与 live 混在一起看，正是误以为看到别人台账的来源之一。
+const fMode = ref<'all' | 'live' | 'demo'>(venueStore.environment);
 const fStatus = ref<'all' | 'closed' | 'holding'>('closed');
 const fSide = ref<'all' | 'long' | 'short'>('all');
 const fResult = ref<'all' | 'win' | 'loss'>('all');
@@ -201,6 +237,22 @@ const truncation = computed<{ kept: number; total: number } | null>(() => {
         >
           {{ t('dash.ledger.countRecords', undefined, { a: filtered.length, b: all.length }) }}
         </span>
+        <!-- 账号范围披露 + 历史遗留开关（隐藏数量来自 _meta.ledger_scope，粗粒度、不含指纹） -->
+        <label
+          v-if="hiddenLegacy > 0 || showLegacy"
+          class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 border text-3xs font-mono cursor-pointer select-none"
+          style="background-color: var(--surface-2); border-color: var(--line-1); color: var(--ink-3)"
+          :title="t('dash.ledger.scope.hint')"
+        >
+          <input
+            type="checkbox"
+            class="h-3 w-3 accent-[var(--accent)]"
+            :checked="showLegacy"
+            @change="toggleLegacy(($event.target as HTMLInputElement).checked)"
+          />
+          <span>{{ t('dash.ledger.scope.showLegacy') }}</span>
+          <span v-if="!showLegacy && hiddenLegacy > 0">· {{ t('dash.ledger.scope.hidden', undefined, { n: hiddenLegacy }) }}</span>
+        </label>
         <span class="hidden md:inline text-3xs text-[var(--ink-3)]">
           · {{ t('dash.ledger.desc') }}
         </span>

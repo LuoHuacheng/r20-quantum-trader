@@ -9,12 +9,19 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-from r20_gateway.pidfile import PID_FILE  # noqa: E402  (唯一定义处：pidfile.py)
+from r20_gateway.pidfile import PID_FILE, read_pid  # noqa: E402  (唯一定义处：pidfile.py)
 LOCK_FILE = ROOT / "data" / ".r20_gateway.lock"
 LOG_FILE = ROOT / "logs" / "r20_gateway_supervisor.log"
 _stop = threading.Event()
 _thread: threading.Thread | None = None
 _owned_pid = 0
+
+#: /proc 是 Linux 专属：macOS/Windows 没有它。旧实现在读失败时把进程判成
+#: 「不是 worker」，`current_pid()` 随即 unlink PID 文件——活体持锁者在后台
+#: 面板上永远显示「未运行」，而 `_find_live_worker_pid` 也扫不到真身。
+#: 判定真相始终是 flock 单持有者，PID 文件只是缓存提示：无 /proc 时降级为
+#: 「存活即本仓 worker」，与下方 EACCES 降级分支同一语义（单 checkout 无歧义）。
+_PROC_AVAILABLE = Path("/proc/self").exists()
 
 
 def _alive(pid: int) -> bool:
@@ -25,6 +32,8 @@ def _alive(pid: int) -> bool:
 
 def _is_gateway_worker(pid: int) -> bool:
     if not _alive(pid): return False
+    if not _PROC_AVAILABLE:
+        return True   # 见 _PROC_AVAILABLE 注释：无 /proc 时以 flock 为真相
     try:
         cmdline=(Path("/proc")/str(pid)/"cmdline").read_bytes().replace(b"\0",b" ").decode(errors="replace")
     except OSError: return False
@@ -72,8 +81,16 @@ def _lock_held() -> bool:
 
 
 def _find_live_worker_pid() -> int:
-    """扫 /proc 收养活体 worker 真身（取启动最早者，排除刚 spawn 的将死子进程）。"""
+    """扫 /proc 收养活体 worker 真身（取启动最早者，排除刚 spawn 的将死子进程）。
+
+    无 /proc 主机（macOS/Windows）无从枚举进程：退回 PID 文件这一唯一提示。
+    提示缺失/已死 → 返回 0（调用方语义：锁被占但真身不可辨 ⇒ 本轮不动、绝不
+    spawn，下一 tick 再探），绝不臆造 pid。
+    """
     best_pid, best_start = 0, None
+    if not _PROC_AVAILABLE:
+        hint = read_pid()
+        return hint if (hint and _alive(hint)) else 0
     try:
         entries = os.listdir("/proc")
     except OSError:

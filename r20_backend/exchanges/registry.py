@@ -214,14 +214,17 @@ def is_registered(venue: str) -> bool:
     return str(venue or "").strip().lower() in _ADAPTERS
 
 
-def require_execution(venue: str, environment: Optional[str] = None) -> None:
+def require_execution(venue: str, environment: Optional[str] = None, adapter=None) -> None:
     """执行门禁：任何场所经适配器下单前先问这里。未开闸一律 fail-closed。
 
     environment=None → 按解析出的适配器实例档位取轴（旧 TESTNET 布尔 → 沙盒档
     检查 ``R20_GATE_DEMO_EXECUTION``；live 档维持 ``R20_GATE_EXECUTION``）。
     拒绝文案指向**当前档位实际缺的那把开关**，不误导去开另一档。
     """
-    adapter = get_adapter(venue, environment)
+    # adapter 传入即复用调用方的实例（执行路由就是这么调的）：实例化会触发沙盒档
+    # 域名探测（出网），既是多余 I/O，也让同一次下单用到两个实例的能力表。
+    # 不传则维持原行为（自行构造），逐字节兼容既有调用方。
+    adapter = adapter if adapter is not None else get_adapter(venue, environment)
     cap = adapter.capabilities
     env = str(getattr(adapter, "environment", "live") or "live")
     if not execution_open(cap.venue, env):

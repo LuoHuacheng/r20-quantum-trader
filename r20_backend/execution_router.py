@@ -180,7 +180,8 @@ def open_protected_position(decision: Dict[str, Any], *,
 
     # 执行开闸（默认关；env 显式打开且凭证就绪前一切免谈）——保持既有契约：
     # 未开闸一律抛 ExchangeCapabilityError；下面才是「已开闸但该所池子仍不许发」的判定。
-    require_execution(venue, environment=str(getattr(ad, "environment", "live") or "live"))
+    require_execution(venue, environment=str(getattr(ad, "environment", "live") or "live"),
+                      adapter=ad)
 
     if pool:
         if pool.get("dry_run"):

@@ -81,7 +81,8 @@ def open_protected_position(decision: Dict[str, Any], *,
 
     own_position：调用方（lab/trader）在该合约上的在管仓位记录（含 size_signed/side）；
     交易所既有仓与之一致视为己仓放行，否则视为外部连坐风险拒开（stage=precheck）。
-    margin_mode：由账户实况推导传入（cross/isolated）；缺省维持历史行为 cross。
+    margin_mode：显式档位（cross/isolated）；缺省时向适配器读账户实况推导，
+    读不回或适配器无此能力 → 维持历史行为 cross。
     environment：显式资金环境（demo/live），优先使用；缺省读 decision.get('environment')。
     max_margin_usdt：调用方按权益算出的单笔保证金硬顶（权益×R20_MAX_MARGIN_EQUITY_RATIO）；
     缺省 0/None = 不臆造占比上限，但仍强制单标的绝对封顶（审计 P0-1）。
@@ -275,8 +276,21 @@ def open_protected_position(decision: Dict[str, Any], *,
                          + "——外部仓连坐拒开", venue=venue, existing_size=ex_signed)
 
     # 杠杆档位（失败即止，未下单无风险）；margin_mode 由账户实况推导，缺省 cross
+    # 调用方未传档位时**必须**以账户实况为准：Binance Demo 域 /fapi/v1/marginType
+    # 不可用（-1102/-1022，见 binance.py 实测），账户若为 isolated 而这里硬编码
+    # cross → set_leverage 必抛 fail-closed 拒单（实测「一单都下不出去」）。
+    # 适配器无此能力（Gate）/ 读回失败 → 维持历史行为 cross，逐字节不变。
+    _margin_mode = margin_mode
+    if not _margin_mode:
+        _reader = getattr(ad, "position_margin_type", None)
+        if callable(_reader):
+            try:
+                _inst = ad.native_symbol(asset) if hasattr(ad, "native_symbol") else asset
+                _margin_mode = _reader(_inst) or None
+            except Exception:
+                _margin_mode = None
     try:
-        ad.set_leverage(asset, leverage, margin_mode=margin_mode or "cross")
+        ad.set_leverage(asset, leverage, margin_mode=_margin_mode or "cross")
     except ExchangeCapabilityError:
         raise
     except Exception as exc:

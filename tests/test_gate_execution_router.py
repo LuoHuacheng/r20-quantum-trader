@@ -339,6 +339,37 @@ class TestExternalPositionPrecheck(unittest.TestCase):
         self.assertTrue(r["ok"], r.get("detail"))
         self.assertEqual(ad.calls[1], ("leverage", "BTC", 3, "isolated"))
 
+    def _open_pool(self):
+        """隔离 ambient data/venue_routing.json：本类只验证保证金档位推导，
+        池门禁（dry_run/assets）由 test_venue_wiring 覆盖。"""
+        return patch.object(router, "_load_venue_pool_soft",
+                            lambda venue: {"assets": ["BTC"], "dry_run": False,
+                                           "max_open": 5, "margin_per_trade_usdt": 1000.0,
+                                           "min_confidence": 50.0})
+
+    def test_margin_mode_derived_from_account_when_omitted(self):
+        # Binance Demo 域 /fapi/v1/marginType 不可用（-1102）：调用方不传档位时
+        # router 必须以账户实况为准，而不是硬编码 cross——否则必然 fail-closed 拒单
+        ad = _StubAdapter()
+        ad.position_margin_type = lambda inst: "isolated"
+        with self._env(), self._open_pool():
+            r = router.open_protected_position(_decision(), adapter=ad, price_ref=79000.0)
+        self.assertTrue(r["ok"], r.get("detail"))
+        self.assertEqual(ad.calls[1], ("leverage", "BTC", 3, "isolated"))
+
+    def test_margin_mode_reader_failure_falls_back_to_cross(self):
+        # 读回失败（老所/端点异常）不得改变历史行为：仍按 cross 走
+        ad = _StubAdapter()
+
+        def _boom(inst):
+            raise RuntimeError("positionRisk down")
+
+        ad.position_margin_type = _boom
+        with self._env(), self._open_pool():
+            r = router.open_protected_position(_decision(), adapter=ad, price_ref=79000.0)
+        self.assertTrue(r["ok"], r.get("detail"))
+        self.assertEqual(ad.calls[1], ("leverage", "BTC", 3, "cross"))
+
 
 class TestAdapterPayloadShapes(unittest.TestCase):
     """attach 双腿报文与 rule 映射（不打桩 signed_request，直接检查其入参）。"""

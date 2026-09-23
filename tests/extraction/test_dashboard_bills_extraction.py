@@ -441,6 +441,10 @@ _CYCLE_PROBE = r'''
 "CACHE_DATA", ...)`（`unittest.mock` 在 unwinding 时**还原该属性**，从而丢掉函数
 刚写好的载荷），于是断言读到的是别人塞进去的空 dict —— 与抽取正确性无关。
 全新进程没有这些外部补丁，是唯一能稳定验证"端到端是否接通"的办法。
+
+台账接缝用 `_core_load_ledger_scoped`（4 元组 valid / table / scope / hidden_rows）
+—— 旧名 `_core_load_ledger_lifecycle_trades` 抽取后已只剩 ledger_view 的兼容壳，
+门面不再暴露，patch 它只会 AttributeError 把探针打死。
 """
 import json
 import sys
@@ -510,7 +514,7 @@ def main():
          patch.object(app, "_load_local_factor_library", lambda: {}), \
          patch.object(app, "_build_factors_from_local_files", lambda p, ts: ([], {})), \
          patch.object(app, "build_ai_health", lambda ai: {}), \
-         patch.object(app, "_core_load_ledger_lifecycle_trades", lambda *a, **k: ([], [])), \
+         patch.object(app, "_core_load_ledger_scoped", lambda *a, **k: ([], [], {}, [])), \
          patch.object(app, "_core_load_local_reads", lambda *a, **k: dict(local)), \
          patch.object(app, "_core_collect_algo_protection", lambda *a, **k: None):
         app.update_cache_cycle()

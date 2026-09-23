@@ -155,6 +155,51 @@ class ConstitutionMergeTests(unittest.TestCase):
         self.assertTrue(preserve)
 
 
+class ClosedTradesVenueTests(unittest.TestCase):
+    """2026-09-23：`load_closed_trades` 组装复盘行时不带 `venue`，跨交易所分布恒为 OKX。
+
+    现场取证（币安账户移除前）：29 笔复盘样本里 25 笔 `strategy='🏛️ Binance'`，
+    而 `compose_evolution_prompts` 的 v_counts 只认 `t["venue"]`（append 时没写）
+    → `t.get("venue") or "okx"` 一律落到 OKX。清不清币安，这个统计都一直是错的。
+    """
+
+    def _write_ledger(self, rows):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "trading_ledger.json"
+        path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        for name, val in (("LEDGER_JSON_FILE", str(path)), ("DATA_DIR", tmp.name)):
+            p = patch.object(sie, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _row(self, **over):
+        row = {"inst": "BTC", "side": "多", "status": "closed",
+               "open_time": "2026-09-16 00:00:00", "close_time": "2026-09-16 01:00:00",
+               "pnl": 1.0, "gross_pnl": 1.0, "fee": 0.0, "strategy": "🏛️ Binance"}
+        row.update(over)
+        return row
+
+    def test_carries_venue_into_evolution_sample(self):
+        self._write_ledger([self._row(venue="binance")])
+        trades = sie.load_closed_trades()
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["venue"], "binance")
+
+    def test_missing_venue_defaults_to_okx(self):
+        # 旧 OKX 行没有 venue 字段——沿用 compose 侧的兜底语义，不得空着
+        self._write_ledger([self._row()])
+        trades = sie.load_closed_trades()
+        self.assertEqual(trades[0]["venue"], "okx")
+
+    def test_cross_venue_summary_reports_both(self):
+        self._write_ledger([self._row(venue="binance"), self._row(inst="ETH")])
+        trades = sie.load_closed_trades()
+        _s, u, _ts, _audit = sie.compose_evolution_prompts(trades, timestamp_str="T")
+        self.assertIn("BINANCE: 1笔", u)
+        self.assertIn("OKX: 1笔", u)
+
+
 class PromptConstitutionInjectionTests(unittest.TestCase):
     """宪章必须在 apply_module_layout 之后注入——风格档案保存的旧分节拷贝无法覆盖它。"""
 

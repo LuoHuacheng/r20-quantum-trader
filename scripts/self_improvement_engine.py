@@ -322,6 +322,9 @@ def load_closed_trades(start_time_override: str | None = None):
                     observability = classify_snapshot_observability(snap)
                     closed_trades.append({
                         "inst": inst,
+                        # 逐单交易所归属（2026-09-23）：此前不带 venue，复盘提示词里既无
+                        # 分布统计、逐单 JSON 也看不出是哪个所——多所台账形同单所。
+                        "venue": str(t.get("venue") or "okx").strip().lower() or "okx",
                         "side": raw_side,
                         "time": c_time,
                         "open_time": t.get("open_time", ""),
@@ -417,7 +420,7 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
     for t in closed_trades:
         v = str(t.get("venue") or "okx").upper()
         v_counts[v] = v_counts.get(v, 0) + 1
-    v_summary = ", ".join(f"{v}: {c}笔" for v, c in sorted(v_counts.items())) if v_counts else "无"
+    venue_summary = ", ".join(f"{v}: {c}笔" for v, c in sorted(v_counts.items())) if v_counts else "无"
 
     memory_context = f"""======================= 【当前系统已有的历史长期记忆库】 =======================
 {existing_memory_md.strip()}
@@ -431,7 +434,6 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
 ======================= 【R20 加密量化实盘战绩与历史交易台账】 =======================
 【统计汇总】:
 - 总平仓笔数: {total} 笔 (胜 {len(wins)} / 负 {len(losses)} | 胜率: {win_rate}%)
-- 跨交易所分布: {v_summary}
 - 累计净盈亏: {total_net:+.2f} USDT | 累计手续费消耗: {total_fees:.2f} USDT
 - 当前聚焦标的池: {TARGET_INSTRUMENTS}
 
@@ -478,6 +480,13 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
     # 措辞风格，永远无法删改证据纪律与基准心法保护（Code is Law，2026-09-10）。
     host_constitution = build_host_constitution(
         observability_brief=observability_brief    )
+    # 交易所分布属**宿主确定性证据**，与宪章同源，故在 layout 之后追加：
+    # prompt_library 的 evolution_user 档案会整段替换内置模板（实测该档案里没有
+    # 「跨交易所分布」这句 → 2026-09-23 复盘提示词 grep 计数 0），只有宿主追加
+    # 才能保证它不被档案措辞改写或静默丢掉。
+    host_constitution = host_constitution + (
+        f"5. 交易所分布（宿主确定性统计，非模型推断）：{venue_summary}。\n"
+    )
     effective_evolution_system = effective_evolution_system.rstrip() + host_constitution
     effective_evolution_user = effective_evolution_user.rstrip() + host_constitution
     return effective_evolution_system, effective_evolution_user, now_bj_str, snapshot_audit

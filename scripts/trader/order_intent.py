@@ -33,11 +33,18 @@ from __future__ import annotations
 
 import time
 
+# 入场折扣硬地板：占现价的比例。
+#
+# 账本实测（2026-09-23 之前 26 笔做多入场）：AI 给的回踩入场价相对现价中位只低 0.52%，
+# 而止损距离在 1.7~2.7% —— 即“回踩 0.5% 就成交，再跌 2% 才止损”，等于在结构失效点
+# 上方 2% 的位置接单。LLM 给的深度若已比地板更深则原样保留：本常量只抬地板，不夺权。
+MIN_ENTRY_PULLBACK_RATIO = 0.012
+
 
 def resolve_entry_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
     """按 AI 决策给定或盘口兜底，算出 `(limit_px, tp_px, sl_px)`。
 
-    与搬走前的内联实现逐字一致：
+    与搬走前的内联实现逐字一致（唯一的新增是下方那道**回踩地板**，见模块常量）：
 
     - `limit_px`：AI 的 `entry_price`（>0 时）否则 `bidPx`（多）/ `askPx`（空），
       再退回 `f["price"]`；
@@ -54,6 +61,17 @@ def resolve_entry_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
         if (ai_decision and ai_decision.get("entry_price", 0) > 0)
         else ((f.get("bidPx") if is_long else f.get("askPx")) or f["price"]),
         prec)
+    # 回踩地板：长单不得高于现价 × (1 - ratio)，空单不得低于现价 × (1 + ratio)。
+    # 现价不可用（<=0）时不臆造地板，交给下方及 brackets 的几何闸门。
+    try:
+        _ref_px = float(f.get("price") or 0.0)
+    except (TypeError, ValueError):
+        _ref_px = 0.0
+    if _ref_px > 0:
+        if is_long:
+            limit_px = round(min(limit_px, _ref_px * (1.0 - MIN_ENTRY_PULLBACK_RATIO)), prec)
+        else:
+            limit_px = round(max(limit_px, _ref_px * (1.0 + MIN_ENTRY_PULLBACK_RATIO)), prec)
     tp_px = round(
         ai_decision.get("take_profit_price")
         if (ai_decision and ai_decision.get("take_profit_price", 0) > 0)

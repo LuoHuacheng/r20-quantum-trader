@@ -85,7 +85,10 @@ TIME_STOP_HOURS = _env_float("R20_TIME_STOP_HOURS", 8.0)
 # 时间止损横盘判定带宽（×ATR），浮盈绝对值小于该带宽才视为无突破。
 TIME_STOP_ATR_BAND = _env_float("R20_TIME_STOP_ATR_BAND", 0.15)
 # 止损出局后同标的同向冷静期（分钟）。
-STOP_COOLDOWN_MINUTES = _env_int("R20_STOP_COOLDOWN_MINUTES", 30)
+# 2026-09-24 由 30 提到 90：账本显示同标的在同一震荡区间被反复接单
+# （ADA 在 07:00/07:30/07:45/08:15/11:45/12:30 共 6 次做多，止损位与入场位几乎未变），
+# 30 分钟只隔 2 个轮次，不足以让区间失效或让模型换一个判断。
+STOP_COOLDOWN_MINUTES = _env_int("R20_STOP_COOLDOWN_MINUTES", 90)
 
 # ── 组4 · 顺势金字塔加仓门禁 ─────────────────────────────────────
 # 单标的最大顺势加仓次数（0 = 禁止加仓）。
@@ -141,7 +144,7 @@ DEFAULTS = {
     "R20_DAILY_LOSS_EQUITY_RATIO": 0.05,
     "R20_TIME_STOP_HOURS": 8.0,
     "R20_TIME_STOP_ATR_BAND": 0.15,
-    "R20_STOP_COOLDOWN_MINUTES": 30,
+    "R20_STOP_COOLDOWN_MINUTES": 90,
     "R20_MAX_SCALE_IN_COUNT": 1,
     "R20_MIN_SCALE_IN_PROFIT_RATIO": 0.008,
     "R20_MIN_SCALE_IN_CONFIDENCE": 75.0,

@@ -42,6 +42,9 @@ class PromptMathFoundationsTests(unittest.TestCase):
             "name": "BTC", "instId": "BTC-USDT-SWAP", "data_quality": "valid",
             "price": 60000, "chg24h": 1.2, "bidPx": 59999, "askPx": 60001,
             "smart_money": {}, "adx_1h": 28, "recent_15m": [], "recent_1h": [], "recent_4h": [],
+            # 真实包必带 vwap_bias（packages.py 初始化即 0.0），夹具不能缺：
+            # 05_vwap_premium_gate 对缺失值 fail-closed，缺字段会让本夹具变成无效场景。
+            "vwap_bias": 0.4,
             "fundingRate": 0.01, "oiUsd": 1000000, "lsRatio": 1.1, "takerNetUsd": 12000,
             "calculus": {
                 "valid": True, "velocity": 0.4, "acceleration": 0.2, "impulse": 0.9,

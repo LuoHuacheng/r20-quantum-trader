@@ -253,7 +253,7 @@ function groupSummary(groupId: string): string {
     return `R:R ${rrMin}~${rrMax} · 置信度 ≥ ${draft.R20_MIN_ENTRY_CONFIDENCE || 80}%`;
   }
   if (groupId === 'stop_loss') {
-    return `止损宽 ${draft.R20_STOP_LOSS_ATR_MULT || 2.0}x ATR · 日亏 ${Math.round((draft.R20_DAILY_LOSS_EQUITY_RATIO || 0.05) * 100)}% · 冷静 ${draft.R20_STOP_COOLDOWN_MINUTES || 30}m`;
+    return `止损宽 ${draft.R20_STOP_LOSS_ATR_MULT || 2.0}x ATR · 日亏 ${Math.round((draft.R20_DAILY_LOSS_EQUITY_RATIO || 0.05) * 100)}% · 冷静 ${draft.R20_STOP_COOLDOWN_MINUTES || 90}m`;
   }
   if (groupId === 'pyramiding') {
     return (draft.R20_MAX_SCALE_IN_COUNT || 0) > 0 ? `允许加仓 ${draft.R20_MAX_SCALE_IN_COUNT} 次` : '已禁用加仓';

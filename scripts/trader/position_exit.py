@@ -27,6 +27,13 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+# 保本移锁门槛（× ATR）：峰值浮盈达此倍数就把止损推到保本 + 0.20% 成本垫。
+#
+# 2026-09-24 由 1.5 降到 0.8：账本里多数仓位在到达止损前从未断过 1.5×ATR 浮盈
+# （XRP 峰值仅 +0.42%，另一笔更从未转浮盈），保本线不可达 ⇒ 仓位全程无保护直挺到止损。
+# 下移后与 `R20_SCALE_OUT_TRIGGER_ATR`(1.2) / Tier2(2.2) 形成更密的阶梯。
+BREAKEVEN_LOCK_ATR = 0.8
+
 
 def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, executed_actions,
     *,
@@ -192,11 +199,11 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         return True, "时间止损"
 
     # 3. Three-Tier Ratchet Profit-Locking & Momentum Take-Profit Engine
-    # Tier 1: Breakeven Lock at +1.5x ATR (~1.0R profit, covers taker fee + 0.20% cushion)
+    # Tier 1: Breakeven Lock at +0.8x ATR (covers taker fee + 0.20% cushion)
     # Tier 2: Solid Wave Profit Lock at +2.2x ATR (~1.6R profit, lock in at least +1.0x ATR profit)
     # Tier 3: Kinetic Momentum Pullback Exit (Symmetric >= 2.0x ATR peak profit with 0.75x ATR pullback)
     
-    tier1_breakeven_trigger = 1.5 * atr
+    tier1_breakeven_trigger = BREAKEVEN_LOCK_ATR * atr
     tier2_lock_trigger = 2.2 * atr
     momentum_tp_trigger = 2.0 * atr
     momentum_pullback_buffer = 0.75 * atr

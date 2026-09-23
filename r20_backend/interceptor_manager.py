@@ -32,6 +32,7 @@ DEFAULT_ORDER = [
     "02_confidence_gatekeeper.py",
     "03_adx_volatility_filter.py",
     "04_risk_reward_gatekeeper.py",
+    "05_vwap_premium_gate.py",
     "99_custom_template_sample.py",
 ]
 
@@ -40,6 +41,7 @@ DEFAULT_ENABLED = {
     "02_confidence_gatekeeper.py": True,
     "03_adx_volatility_filter.py": True,
     "04_risk_reward_gatekeeper.py": True,
+    "05_vwap_premium_gate.py": True,
     "99_custom_template_sample.py": False,
 }
 
@@ -432,6 +434,7 @@ def run_sandbox_test(custom_scenario: Optional[dict[str, Any]] = None) -> dict[s
                 "instId": "BTC-USDT-SWAP",
                 "macro_4h": "4H_MACRO_BULL (大级别多头通道)",
                 "adx_1h": 25.0,
+                "vwap_bias": -0.4,
                 "data_quality": "valid",
             },
             "decision": {
@@ -450,6 +453,7 @@ def run_sandbox_test(custom_scenario: Optional[dict[str, Any]] = None) -> dict[s
                 "instId": "ETH-USDT-SWAP",
                 "macro_4h": "4H_MACRO_BULL",
                 "adx_1h": 14.2,
+                "vwap_bias": 0.3,
                 "data_quality": "valid",
             },
             "decision": {
@@ -468,6 +472,7 @@ def run_sandbox_test(custom_scenario: Optional[dict[str, Any]] = None) -> dict[s
                 "instId": "SOL-USDT-SWAP",
                 "macro_4h": "4H_MACRO_BULL",
                 "adx_1h": 28.5,
+                "vwap_bias": 0.2,
                 "data_quality": "valid",
             },
             "decision": {
@@ -486,6 +491,7 @@ def run_sandbox_test(custom_scenario: Optional[dict[str, Any]] = None) -> dict[s
                 "instId": "SUI-USDT-SWAP",
                 "macro_4h": "4H_MACRO_BULL",
                 "adx_1h": 32.0,
+                "vwap_bias": 0.5,
                 "data_quality": "valid",
             },
             "decision": {
@@ -494,6 +500,25 @@ def run_sandbox_test(custom_scenario: Optional[dict[str, Any]] = None) -> dict[s
                 "entry_price": 0.80,
                 "take_profit_price": 0.95,
                 "stop_loss_price": 0.74,
+            },
+            "context": {"active_inst_ids": set(), "active_position_sides": {}},
+        },
+        {
+            "name": "场景 5: 顺势但买在 VWAP 溢价区 (ADA 乖离 +2.4%)",
+            "package": {
+                "name": "ADA",
+                "instId": "ADA-USDT-SWAP",
+                "macro_4h": "4H_MACRO_BULL",
+                "adx_1h": 33.0,
+                "vwap_bias": 2.4,
+                "data_quality": "valid",
+            },
+            "decision": {
+                "action": "BUY_LONG",
+                "confidence": 86.0,
+                "entry_price": 0.2585,
+                "take_profit_price": 0.2750,
+                "stop_loss_price": 0.2505,
             },
             "context": {"active_inst_ids": set(), "active_position_sides": {}},
         },

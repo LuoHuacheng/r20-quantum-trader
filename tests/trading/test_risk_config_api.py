@@ -307,7 +307,7 @@ class PromptRiskContractTests(unittest.TestCase):
             self.assertIn("金字塔加仓: 已禁用", budget)   # scale=0 自动切换禁令文案
             self.assertIn("盈亏比 R:R 硬底线: 2.0", budget)
             self.assertIn("新开仓最低置信度门禁: 80%", budget)
-            self.assertIn("止损后同标的冷静期: 30 分钟", budget)
+            self.assertIn("止损后同标的冷静期: 90 分钟", budget)
             # System 宪法保持逐字不变（快照安全）
             self.assertEqual(abt.SYSTEM_PROMPT, abt._SYSTEM_CORE + abt._PYRAMID + "\n" + abt._SYSTEM_JSON_CONTRACT)
         finally:

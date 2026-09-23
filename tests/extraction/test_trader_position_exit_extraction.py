@@ -51,14 +51,73 @@ def _body_dump(fn: ast.FunctionDef) -> str:
 
 
 class PositionExitVerbatimTest(unittest.TestCase):
+    # 2026-09-24 的**有意行为变更**（不是搬运事故）：保本移锁门槛由 1.5×ATR 降到
+    # `BREAKEVEN_LOCK_ATR`（0.8）——账本里多数仓位在到达止损前从未断过 1.5×ATR 浮盈，
+    # 保本线不可达 ⇒ 仓位全程无保护直挺到止损。下面两条语句是**全部**差异：
+    # 一条阈值行 + 它上方那句说明性注释。其余仍逐字比对，
+    # 并由 test_breakeven_threshold_actually_lowered 与
+    # test_breakeven_lock_arms_at_new_threshold 正向钉住（白名单不得被滥用）。
+    _CHANGED_STMT = (
+        # (当前文本, 基线文本)
+        ("tier1_breakeven_trigger = BREAKEVEN_LOCK_ATR * atr",
+         "tier1_breakeven_trigger = 1.5 * atr"),
+        ("# Tier 1: Breakeven Lock at +0.8x ATR (covers taker fee + 0.20% cushion)",
+         "# Tier 1: Breakeven Lock at +1.5x ATR (~1.0R profit, covers taker fee + 0.20% cushion)"),
+    )
+
+    @staticmethod
+    def _normalise_body(fn: ast.FunctionDef) -> str:
+        """把上面的有意变更还原成抽取时的样子，再比对。"""
+        src = ast.unparse(ast.Module(body=fn.body, type_ignores=[]))
+        for now, baseline in PositionExitVerbatimTest._CHANGED_STMT:
+            src = src.replace(now, baseline)
+        return src
+
     def test_moved_body_matches_pre_extraction_verbatim(self):
         o = _get_func(ast.parse(_base_text()), FN)
         n = _get_func(ast.parse(
             (ROOT / "scripts/trader/position_exit.py").read_text(encoding="utf-8")), FN)
         self.assertEqual([a.arg for a in o.args.args], [a.arg for a in n.args.args])
         self.assertEqual([a.arg for a in n.args.kwonlyargs], list(INJ))
-        self.assertEqual(_body_dump(o), _body_dump(n),
+        self.assertEqual(self._normalise_body(o), self._normalise_body(n),
                          "持仓退出主流程与抽取前**不再是同一实现**")
+
+    def test_breakeven_threshold_actually_lowered(self):
+        """正向断言：放行的阈值行必须真是新值（白名单不许被滥用成“什么都不查”）。"""
+        import scripts.trader.position_exit as pe
+        self.assertEqual(pe.BREAKEVEN_LOCK_ATR, 0.8)
+        src = (ROOT / "scripts/trader/position_exit.py").read_text(encoding="utf-8")
+        self.assertIn(self._CHANGED_STMT[0][0], src)
+        self.assertNotIn("tier1_breakeven_trigger = 1.5 * atr", src)
+
+    def test_breakeven_lock_arms_at_new_threshold(self):
+        """有效行为例：峰值浮盈仅 0.8×ATR 时，止损失必须已被推到保本。
+
+        旧阈值（1.5×ATR）下同一形态不会移损 —— 这是本次改动真正要买回来的保护。
+        """
+        import scripts.ai_factor_trader as aft
+        atr, entry = 20.0, 2500.0
+        f = {"instId": "ETH-USDT-SWAP", "name": "ETH", "price": entry + atr * 0.5,
+             "atr": atr, "precision": 2, "ctVal": 0.1, "type": "crypto",
+             "market_data_valid": True}
+        curr_pos = {"pos": "2.0", "side": "long", "avgPx": str(entry), "upl": 10.0,
+                    "uplRatio": 0.02}
+        key = "ETH-USDT-SWAP_long"
+        trackers = {key: {"instId": "ETH-USDT-SWAP", "name": "ETH", "side": "long",
+                          "entryPx": entry, "initialSz": 2.0, "currentSz": 2.0,
+                          "highWaterMark": entry + atr * 0.8,
+                          "lowWaterMark": entry, "trailingStopPx": entry - atr * 2,
+                          "takeProfitPx": entry + atr * 3}}
+        synced: list = []
+        with patch.object(aft, "protection_signals", lambda **k: False), \
+             patch.object(aft, "sync_cloud_algo_stop",
+                          lambda *a, **k: synced.append((a, k))), \
+             patch.object(aft, "record_signal_snapshot", lambda *a, **k: None), \
+             patch.object(aft, "ensure_cloud_position_protection", lambda *a, **k: (True, "ok")):
+            aft.manage_position_tp_and_trailing(f, curr_pos, trackers, "2026-09-07 10:00:00", [])
+        self.assertEqual(trackers[key]["trailingStopPx"], round(entry * 1.002, 2),
+                         "峰值 0.8×ATR 未触发保本移损（新阈值没生效）")
+        self.assertTrue(synced, "移损未同步到云端保护单")
 
     def test_shell_signature_and_injections(self):
         o = _get_func(ast.parse(_base_text()), FN)

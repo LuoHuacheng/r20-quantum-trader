@@ -49,6 +49,42 @@ def _legacy_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
     return limit_px, tp_px, sl_px
 
 
+def _with_pullback_floor(limit_px, *, is_long, f, prec):
+    """把 2026-09-24 新增的**回踩地板**施于 `limit_px`（单独一笔、可审）。
+
+    地板是整套三价定价里**唯一**的文档化行为差异，且比 legacy 里的 TP/SL 兑底**发生更早**
+    （AI 未给止盈/止损时，兼底基准是从地板后的 `limit_px` 算的）。因此差分预期遵循同一
+    顺序，而不是在地板后再拿旧 tp/sl —— 后者会得到一套现实中永不出现的组合。
+    """
+    try:
+        ref_px = float(f.get("price") or 0.0)
+    except (TypeError, ValueError):
+        ref_px = 0.0
+    if ref_px <= 0:
+        return limit_px
+    ratio = order_intent.MIN_ENTRY_PULLBACK_RATIO
+    if is_long:
+        return round(min(limit_px, ref_px * (1.0 - ratio)), prec)
+    return round(max(limit_px, ref_px * (1.0 + ratio)), prec)
+
+
+def _expected_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
+    """差分预期 = 搬走前的实现 + 上面那道地板（作用于 limit_px，再重算兑底）。"""
+    limit_px = _with_pullback_floor(
+        _legacy_prices(is_long=is_long, ai_decision=ai_decision, f=f,
+                       prec=prec, tp_dist=tp_dist, sl_dist=sl_dist)[0],
+        is_long=is_long, f=f, prec=prec)
+    tp_px = round(
+        ai_decision.get("take_profit_price")
+        if (ai_decision and ai_decision.get("take_profit_price", 0) > 0)
+        else (limit_px + tp_dist if is_long else limit_px - tp_dist), prec)
+    sl_px = round(
+        ai_decision.get("stop_loss_price")
+        if (ai_decision and ai_decision.get("stop_loss_price", 0) > 0)
+        else (limit_px - sl_dist if is_long else limit_px + sl_dist), prec)
+    return limit_px, tp_px, sl_px
+
+
 def _legacy_intent(*, is_long, inst_id, actual_sz, ct_val, limit_px, ai_lever,
                    margin_usdt, max_margin_usdt, inst_lever_cap, ai_conf, ai_info):
     """搬走前 facade 的 `venue_ctx` 装配（逐字原样，含全部注释锚点）。"""
@@ -83,21 +119,28 @@ class PricesParityTest(unittest.TestCase):
             got = order_intent.resolve_entry_prices(
                 is_long=is_long, ai_decision=dec, f={"bidPx": 100.0, "askPx": 100.5, "price": 100.0},
                 prec=2, tp_dist=5.0, sl_dist=3.0)
-            exp = _legacy_prices(is_long=is_long, ai_decision=dec,
+            exp = _expected_prices(is_long=is_long, ai_decision=dec,
                                  f={"bidPx": 100.0, "askPx": 100.5, "price": 100.0},
                                  prec=2, tp_dist=5.0, sl_dist=3.0)
             self.assertEqual(got, exp, f"is_long={is_long} 与搬走前分叉")
-            self.assertEqual(got, (101.5, 110.0, 95.0))
+            # 做多：AI 给 101.5 > 现价 100（逆势追高）→ 被回踩地板压到 98.8；
+            # 做空：AI 给 101.5 已比地板 101.2 更深 → 原样保留。“不被夺权”两向都验。
+            self.assertEqual(got, (98.8, 110.0, 95.0) if is_long else (101.5, 110.0, 95.0))
 
     def test_venue_side_of_book_differs_by_direction(self):
-        """盘口价：做多取 bidPx，做空取 askPx —— 漏改会让空单盯着买一价下单。"""
-        f = {"bidPx": 100.0, "askPx": 100.5, "price": 99.0}
+        """盘口价：做多取 bidPx，做空取 askPx —— 漏改会让空单盯着买一价下单。
+
+        盘口刻意选得**远离现价**（现价 100 / 买一 97 / 卖一 103）：
+        回踩地板只作用于比 `现价 ±1.2%`（98.8 / 101.2）更差的价，因此两侧都能看见盘口，
+        若实现弄错方向（做多去读 askPx），结果会跳到 98.8 —— 仍然会被抓住。
+        """
+        f = {"bidPx": 97.0, "askPx": 103.0, "price": 100.0}
         lp_long, _, _ = order_intent.resolve_entry_prices(
             is_long=True, ai_decision={}, f=f, prec=2, tp_dist=5.0, sl_dist=3.0)
         lp_short, _, _ = order_intent.resolve_entry_prices(
             is_long=False, ai_decision={}, f=f, prec=2, tp_dist=5.0, sl_dist=3.0)
-        self.assertEqual(lp_long, 100.0, "做多应用 bidPx")
-        self.assertEqual(lp_short, 100.5, "做空应用 askPx")
+        self.assertEqual(lp_long, 97.0, "做多应用 bidPx")
+        self.assertEqual(lp_short, 103.0, "做空应用 askPx")
 
     def test_distances_are_mirrored_by_direction(self):
         f = {"bidPx": 100.0, "askPx": 100.0, "price": 100.0}
@@ -113,10 +156,11 @@ class PricesParityTest(unittest.TestCase):
         for is_long in (True, False):
             got = order_intent.resolve_entry_prices(
                 is_long=is_long, ai_decision={}, f=f, prec=2, tp_dist=5.0, sl_dist=3.0)
-            exp = _legacy_prices(is_long=is_long, ai_decision={}, f=f,
-                                 prec=2, tp_dist=5.0, sl_dist=3.0)
+            exp = _expected_prices(is_long=is_long, ai_decision={}, f=f,
+                                   prec=2, tp_dist=5.0, sl_dist=3.0)
             self.assertEqual(got, exp)
-            self.assertEqual(got[0], 42.0)
+            # 盘口缺失 → 回踩地板作用于 legacy 的 42.0（长 42×0.988=41.496→41.50；空 42×1.012=42.504→42.50）
+            self.assertEqual(got[0], 41.5 if is_long else 42.5)
 
     def test_zero_or_missing_ai_prices_use_fallback(self):
         """AI 三价各自为 0 / 缺失时都必须走兜底（原实现逐个 `> 0` 判定）。"""
@@ -132,7 +176,7 @@ class PricesParityTest(unittest.TestCase):
             for is_long in (True, False):
                 got = order_intent.resolve_entry_prices(
                     is_long=is_long, ai_decision=dec, f=f, prec=2, tp_dist=5.0, sl_dist=3.0)
-                exp = _legacy_prices(is_long=is_long, ai_decision=dec, f=f,
+                exp = _expected_prices(is_long=is_long, ai_decision=dec, f=f,
                                      prec=2, tp_dist=5.0, sl_dist=3.0)
                 self.assertEqual(got, exp, f"{dec} is_long={is_long} 分叉")
 
@@ -142,7 +186,7 @@ class PricesParityTest(unittest.TestCase):
             for is_long in (True, False):
                 got = order_intent.resolve_entry_prices(
                     is_long=is_long, ai_decision=dec, f=f, prec=2, tp_dist=5.0, sl_dist=3.0)
-                exp = _legacy_prices(is_long=is_long, ai_decision=dec, f=f,
+                exp = _expected_prices(is_long=is_long, ai_decision=dec, f=f,
                                      prec=2, tp_dist=5.0, sl_dist=3.0)
                 self.assertEqual(got, exp, f"ai_decision={dec!r} is_long={is_long} 分叉")
 
@@ -173,10 +217,64 @@ class PricesParityTest(unittest.TestCase):
             except Exception as exc:                       # noqa: BLE001
                 got = ("raise", type(exc).__name__)
             try:
-                exp = _legacy_prices(**kw)
+                exp = _expected_prices(**kw)
             except Exception as exc:                       # noqa: BLE001
                 exp = ("raise", type(exc).__name__)
             self.assertEqual(got, exp, f"分叉: {kw}")
+
+
+class PullbackFloorTest(unittest.TestCase):
+    """2026-09-24 新增的回踩地板：入场折扃不得浅于 `MIN_ENTRY_PULLBACK_RATIO × 现价`。
+
+    背景（账本实测 26 笔做多入场）：AI 给的入场价相对现价中位只低 0.52%，
+    而止损距离在 1.7~2.7% —— “回踩 0.5% 就成交，再跌 2% 才止损”，
+    等于在结构失效点上方 2% 的位置接单。地板把成交位推到真正的折扣区。
+    """
+    PX = 100.0
+    R = order_intent.MIN_ENTRY_PULLBACK_RATIO
+
+    def _call(self, *, is_long, entry, tp=0.0, sl=0.0):
+        return order_intent.resolve_entry_prices(
+            is_long=is_long,
+            ai_decision={"entry_price": entry, "take_profit_price": tp, "stop_loss_price": sl},
+            f={"price": self.PX, "bidPx": self.PX, "askPx": self.PX},
+            prec=2, tp_dist=8.0, sl_dist=4.0)
+
+    def test_shallow_entry_is_pushed_to_the_floor(self):
+        """浅回踩（中位 0.52%）被压到 1.2% —— 这是历史绝大多数入场的命运。"""
+        lp, tp, sl = self._call(is_long=True, entry=99.5, tp=110.0, sl=95.0)
+        self.assertEqual(lp, round(self.PX * (1 - self.R), 2))
+        self.assertLess(lp, 99.5)
+        # AI 给定的止盈/止损是**绝对价**，不跟着地板动
+        self.assertEqual((tp, sl), (110.0, 95.0))
+        # 地板只抬高赔率：R:R 从 2.33 升到 2.88，不会反向劣化
+        self.assertGreater((tp - lp) / (lp - sl), (110.0 - 99.5) / (99.5 - 95.0))
+
+    def test_deep_entry_is_left_alone(self):
+        """AI 已给更深折扣（> 地板）时不得被改浅 —— 地板只抬底，不夺决策权。"""
+        lp, _, _ = self._call(is_long=True, entry=97.0)
+        self.assertEqual(lp, 97.0)
+
+    def test_short_side_mirrors(self):
+        """做空必须**向上**取地板（入场上限），弄反就会变成追跌。"""
+        lp, _, _ = self._call(is_long=False, entry=100.5)
+        self.assertEqual(lp, round(self.PX * (1 + self.R), 2))
+        lp, _, _ = self._call(is_long=False, entry=103.0)
+        self.assertEqual(lp, 103.0)
+
+    def test_fallback_brackets_are_derived_from_the_floored_limit(self):
+        """AI 未给止盈/止损时，兼底必须从**地板后**的 limit_px 摇 —— 否则挂单几何与入场位脱钩。"""
+        lp, tp, sl = self._call(is_long=True, entry=0.0)
+        self.assertEqual((lp, tp, sl), (98.8, 98.8 + 8.0, 98.8 - 4.0))
+
+    def test_no_floor_is_invented_without_a_reference_price(self):
+        """现价不可用时不臆造地板（真值交给我们下游几何闸门）。"""
+        f = {"bidPx": 100.0, "askPx": 100.0, "price": 0.0}
+        for is_long in (True, False):
+            lp, _, _ = order_intent.resolve_entry_prices(
+                is_long=is_long, ai_decision={"entry_price": 100.0}, f=f,
+                prec=2, tp_dist=8.0, sl_dist=4.0)
+            self.assertEqual(lp, 100.0)
 
 
 class IntentParityTest(unittest.TestCase):

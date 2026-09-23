@@ -452,8 +452,17 @@ class BinanceExecutionAndProtectionTests(unittest.TestCase):
         from r20_backend.exchanges import listing as listing_mod
         _okl = listing_mod.ListingCheck(ok=True, reason=None,
                                         checked_at="2026-09-11T00:00:00Z", source="cache")
+        # 所池门禁与本用例意图无关：这里验的是 binance 受保护开仓/回滚链路，
+        # 不该被 data/venue_routing.json 的**现场**配置左右（2026-09-23 移除币安账户后
+        # 该文件已无 binance 块 → 空池会让路由器在 venue_pool 阶段先拒单，
+        # 用例红得与它要证明的东西无关）。池值按移除前的现场值钉死。
+        _bn_pool = {"assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "ARB", "SUI",
+                               "LINK", "ADA", "UNI"],
+                    "dry_run": False, "margin_per_trade_usdt": 50.0,
+                    "max_open": 2, "min_confidence": 80.0}
         with patch.dict(os.environ, {"R20_BINANCE_EXECUTION": "1", "R20_BINANCE_DEMO_EXECUTION": "1"}), \
-                patch.object(listing_mod, "ensure_contract_listed", lambda v, e, c: _okl):
+                patch.object(listing_mod, "ensure_contract_listed", lambda v, e, c: _okl), \
+                patch.object(er, "_load_venue_pool_soft", lambda v: dict(_bn_pool)):
             res = er.open_protected_position(decision, adapter=ad)
 
         self.assertTrue(res["ok"])
@@ -500,8 +509,17 @@ class BinanceExecutionAndProtectionTests(unittest.TestCase):
         from r20_backend.exchanges import listing as listing_mod
         _okl = listing_mod.ListingCheck(ok=True, reason=None,
                                         checked_at="2026-09-11T00:00:00Z", source="cache")
+        # 所池门禁与本用例意图无关：这里验的是 binance 受保护开仓/回滚链路，
+        # 不该被 data/venue_routing.json 的**现场**配置左右（2026-09-23 移除币安账户后
+        # 该文件已无 binance 块 → 空池会让路由器在 venue_pool 阶段先拒单，
+        # 用例红得与它要证明的东西无关）。池值按移除前的现场值钉死。
+        _bn_pool = {"assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "ARB", "SUI",
+                               "LINK", "ADA", "UNI"],
+                    "dry_run": False, "margin_per_trade_usdt": 50.0,
+                    "max_open": 2, "min_confidence": 80.0}
         with patch.dict(os.environ, {"R20_BINANCE_EXECUTION": "1", "R20_BINANCE_DEMO_EXECUTION": "1"}), \
-                patch.object(listing_mod, "ensure_contract_listed", lambda v, e, c: _okl):
+                patch.object(listing_mod, "ensure_contract_listed", lambda v, e, c: _okl), \
+                patch.object(er, "_load_venue_pool_soft", lambda v: dict(_bn_pool)):
             res = er.open_protected_position(decision, adapter=ad)
 
         self.assertFalse(res["ok"])

@@ -309,6 +309,34 @@ def _conf_floor_for(inst_id: str) -> float:
         return 75.0
 
 
+def _with_flat_dynamics(package: dict[str, Any]) -> dict[str, Any]:
+    """在插件边界补齐文档承诺的扁平动力学字段（velocity_v / acceleration_a / jerk_j）。
+
+    `plugins/interceptors/99_custom_template_sample.py` 与
+    `frontend/src/views/admin/InterceptorsPage.vue` 都向插件作者承诺
+    `package['velocity_v']` 一类**扁平**字段，但 `scripts/brain/packages.py`
+    只把动力学放在 `package['calculus']['timeframes'][<周期>]` 里 ——
+    照文档写的规则会静默 `float(package.get('acceleration_a', 0) or 0)` 读到 0.0
+    而**永不触发**（风控失效方向是 fail-open，正是最不能接受的那一侧）。
+
+    取 **1H** 数理基石（与提示词「1H 三大数理基石硬证据」同源），并显式声明：
+    取不到时置 `None` 而不是 0.0，插件按 None 自行决定 fail-closed。
+
+    返回浅拷贝，绝不污染调用方的提示词载荷。
+    """
+    flat = dict(package) if isinstance(package, dict) else {}
+    calculus = flat.get("calculus")
+    timeframes = calculus.get("timeframes") if isinstance(calculus, dict) else None
+    basis = timeframes.get("1H") if isinstance(timeframes, dict) else None
+    basis = basis if isinstance(basis, dict) else {}
+    for flat_key, dyn_key in (("velocity_v", "velocity"),
+                              ("acceleration_a", "acceleration"),
+                              ("jerk_j", "jerk")):
+        value = basis.get(dyn_key)
+        flat[flat_key] = float(value) if isinstance(value, (int, float)) else None
+    return flat
+
+
 def run_interceptor_pipeline(package: dict[str, Any], decision: dict[str, Any], context: dict[str, Any]) -> tuple[str, str, float]:
     """
     Executes core deterministic non-bypassable risk checks, then all enabled interceptor plugins in sequence.
@@ -361,6 +389,8 @@ def run_interceptor_pipeline(package: dict[str, Any], decision: dict[str, Any], 
         return "WAIT", f"核心风控拦截：置信度低于安全底线 ({conf:.1f}% < {conf_floor:.1f}%)", rr
 
     # 4. Pipeline Execution across all enabled plugins (with input isolation & fail-closed)
+    # 插件看到的包经过文档契约规范化（见 _with_flat_dynamics）
+    plugin_package = _with_flat_dynamics(package)
     plugins = list_plugins(create_if_missing=False)
     for p_info in plugins:
         if not p_info.get("enabled"):
@@ -377,7 +407,7 @@ def run_interceptor_pipeline(package: dict[str, Any], decision: dict[str, Any], 
                 return "WAIT", f"风控拦截拦截：启用的风控插件 [{filename}] 缺少 check_risk 入口，安全降级为 WAIT", rr
 
             # Deepcopy inputs so user plugins cannot mutate decision/package to bypass core checks
-            p_pkg = copy.deepcopy(package)
+            p_pkg = copy.deepcopy(plugin_package)
             p_dec = copy.deepcopy(decision)
             p_ctx = copy.deepcopy(context)
 

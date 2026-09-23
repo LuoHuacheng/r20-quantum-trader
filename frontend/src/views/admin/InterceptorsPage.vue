@@ -212,7 +212,7 @@ tags: 自定义, 策略广场
 def check_risk(package: dict, decision: dict, context: dict) -> tuple[bool, str]:
     """
     检查交易候选风控指标:
-    - package: 包含标的行情与动力学数据 (macro_4h, velocity_v, acceleration_a, adx_1h 等)
+    - package: 包含标的行情与动力学数据 (macro_4h, adx_1h, velocity_v / acceleration_a / jerk_j —— 后三者是 1H 周期，取不到时为 None，判空后自行 fail-closed)
     - decision: 包含 AI 主脑建议 (action, confidence, entry_price, take_profit_price, stop_loss_price)
     - context: 包含持仓上下文与可用资金
 

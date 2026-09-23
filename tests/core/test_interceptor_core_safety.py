@@ -156,6 +156,47 @@ class CoreRiskAndInterceptorTests(unittest.TestCase):
         # Ensure dec was not mutated by the plugin
         self.assertEqual(dec, dec_copy)
 
+    def test_documented_flat_dynamics_reach_the_plugins(self):
+        """文档契约：99 模板与后台页面承诺的扁平动力学字段必须真的到插件手里。
+
+        历史缺陷：两处文档都写 `package['velocity_v']` / `acceleration_a` / `jerk_j`，
+        但 packager 只把动力学放在 `package['calculus']['timeframes']` 里 ——
+        照文档写的规则静默读到 0.0，永不触发（fail-open）。
+        """
+        probe = self.mock_plugins / "probe.py"
+        probe.write_text(
+            "def check_risk(package, decision, context):\n"
+            "    seen = {k: package.get(k, 'MISSING') for k in\n"
+            "            ('velocity_v', 'acceleration_a', 'jerk_j')}\n"
+            "    return False, repr(seen)\n",
+            encoding="utf-8"
+        )
+        im.save_config({"pipeline_order": ["probe.py"], "enabled": {"probe.py": True}})
+
+        pkg = {
+            "instId": "BTC-USDT-SWAP",
+            "data_quality": "valid",
+            "calculus": {"valid": True, "timeframes": {
+                "15M": {"velocity": -0.42, "acceleration": 0.94, "jerk": 1.46},
+                "1H": {"velocity": -0.87, "acceleration": 0.40, "jerk": 0.42},
+            }},
+        }
+        ctx = {"active_inst_ids": set(), "active_position_sides": {}}
+        dec = {"action": "BUY_LONG", "confidence": 85.0, "entry_price": 100.0,
+               "take_profit_price": 125.0, "stop_loss_price": 90.0}
+
+        act, reason, _ = im.run_interceptor_pipeline(pkg, dec, ctx)
+        self.assertEqual(act, "WAIT")
+        # 取 1H（与提示词「1H 三大数理基石」同源），不是 15M
+        self.assertEqual(reason, repr({"velocity_v": -0.87, "acceleration_a": 0.4, "jerk_j": 0.42}))
+        # 规范化副本不得回写调用方的包
+        self.assertNotIn("velocity_v", pkg)
+
+        # 数据不可用时显式 None（而不是 0.0），插件可据此 fail-closed
+        act, reason, _ = im.run_interceptor_pipeline({"instId": "X", "data_quality": "valid"}, dec, ctx)
+        self.assertEqual(act, "WAIT")
+        self.assertEqual(reason, repr({"velocity_v": None, "acceleration_a": None, "jerk_j": None}))
+
 
 if __name__ == "__main__":
     unittest.main()

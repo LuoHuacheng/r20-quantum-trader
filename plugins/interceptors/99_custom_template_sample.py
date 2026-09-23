@@ -18,12 +18,17 @@ def check_risk(package: dict, decision: dict, context: dict) -> tuple[bool, str]
     1. package: 标的原生与衍生动能数据:
        - package['name']: 币种名称 (如 'BTC')
        - package['macro_4h']: 4H 宏观结构 ('4H_MACRO_BULL' / '4H_MACRO_BEAR' / '4H_MACRO_RANGE')
-       - package['velocity_v']: 一阶对数价格速度 v
-       - package['acceleration_a']: 二阶对数价格加速度 a (a < -0.25 通常表示动能严重失速)
-       - package['jerk_j']: 三阶对数价格加加速度 j (剧烈冲击)
+       - package['velocity_v']: 1H 一阶对数价格速度 v（取不到时为 None，不是 0.0）
+       - package['acceleration_a']: 1H 二阶对数价格加速度 a (a < -0.25 通常表示动能严重失速)
+       - package['jerk_j']: 1H 三阶对数价格加加速度 j (剧烈冲击)
+       - package['calculus']: 全周期动力学原始数据 (['timeframes']['15M'/'1H'/'4H'])，
+         需要更细周期时直接读这里
        - package['adx_1h']: 1小时趋势强度 ADX
        - package['smart_money']: 聪明钱多空比与净流入 (usdt)
        - package['last']: 现价
+
+       ⚠️ 上述三个扁平动力学字段与 adx_1h 取不到时均为 None（adx_1h 为 0.0），
+       写规则时必须判空后 fail-closed，绝不能默认成 0.0 放行 —— 那会让规则永远不触发。
     
     2. decision: AI主脑初步建议:
        - decision['action']: 'BUY_LONG' / 'SELL_SHORT' / 'WAIT'
@@ -43,13 +48,13 @@ def check_risk(package: dict, decision: dict, context: dict) -> tuple[bool, str]
     if action == "WAIT":
         return True, ""
 
-    # 示例规则 1: 动能严重失速时禁止做多
-    try:
-        acc = float(package.get("acceleration_a", 0) or 0)
-        if action == "BUY_LONG" and acc < -0.6:
-            return False, f"多头买入但二阶加速度 a={acc:.3f} 严重失速衰竭，广场示例插件拦截"
-    except Exception:
-        pass
+    # 示例规则 1: 1H 动能严重失速时禁止做多
+    acc = package.get("acceleration_a")
+    if action == "BUY_LONG":
+        if acc is None:
+            return False, "多头买入但 1H 加速度数据不可用，安全降级为 WAIT"
+        if float(acc) < -0.6:
+            return False, f"多头买入但二阶加速度 a={float(acc):.3f} 严重失速衰竭，广场示例插件拦截"
 
     # 示例规则 2: 聪明钱大额逆向净流出时警示
     smart_money = package.get("smart_money", {})

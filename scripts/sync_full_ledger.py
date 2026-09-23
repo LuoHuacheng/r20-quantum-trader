@@ -86,6 +86,27 @@ def _fetch_history_paged(fetch_fn, *, id_field="posId", cursor_field="uTime", li
     return rows, truncated
 
 
+def _connected_venue_status(env) -> dict:
+    """只保留**确实配置了凭证**的场所状态（未配置的所不进旁车）。
+
+    现场取证（2026-09-23）：币安账户移除后 fetch_binance_closed_trades 见凭证为空
+    即静默 return []，而调用点仍给它记 ok/rows=0 —— 旁车把「该所没有账户」说成
+    「该所已同步、确无平仓」，与真实失败不可分辨，前台会显示成一切正常。
+
+    判据复用 accounts.current_venue_accounts（写侧/读侧唯一事实源），只出声明的所、
+    绝不猜。connected 为空 = **问不到**（密钥库读不出 / OKX 环境解析失败）→ 不筛，
+    逐字保留旧行为：绝不让一次读失败把旁车清空。
+    """
+    try:
+        from r20_backend.exchanges.accounts import current_venue_accounts
+        connected = set(current_venue_accounts(env))
+    except Exception:
+        return dict(_FETCH_STATUS)
+    if not connected:
+        return dict(_FETCH_STATUS)
+    return {v: rec for v, rec in _FETCH_STATUS.items() if v in connected}
+
+
 def _write_sync_status(env):
     """原子写旁车；读侧一律容错缺文件（旧版本无旁车=按 OK 不误伤）。
     路径按调用时 DATA_DIR 解析——测试 patch 模块 DATA_DIR 即封闭（律①）。"""
@@ -95,7 +116,7 @@ def _write_sync_status(env):
         "generated_at": datetime.datetime.now(
             datetime.timezone(datetime.timedelta(hours=8))).isoformat(),
         "environment": "demo" if getattr(env, "simulated", False) else "live",
-        "venues": dict(_FETCH_STATUS),
+        "venues": _connected_venue_status(env),
     }
     fd, tmp = tempfile.mkstemp(prefix=".lss-", suffix=".tmp", dir=_dir)
     try:

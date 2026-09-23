@@ -52,6 +52,53 @@ class SyncStatusSidecarTests(unittest.TestCase):
         datetime.datetime.fromisoformat(payload["generated_at"])
 
 
+    def test_unconfigured_venue_omitted_from_sidecar(self):
+        """未配置凭证的场所不进旁车 —— 否则界面把「没账户」显示成「binance ok」。
+
+        现场取证（2026-09-23）：币安账户移除后 fetch 侧静默 return []，
+        旁车仍写 binance/ok/rows=0，与「该所确无平仓」在旁车里不可分辨。
+        """
+
+        class _Env:
+            simulated = True
+            configured = True
+            mode = "demo"
+            api_key = "okx-test-key"
+
+        sfl._mark("okx", "ok")
+        sfl._mark("binance", "ok", rows=0, truncated=False)
+        sfl._mark("gate", "ok", rows=0, truncated=False)
+
+        with patch("r20_backend.exchanges.venue_credentials", return_value=("", "")):
+            sfl._write_sync_status(_Env())
+
+        payload = json.loads(
+            Path(self.tmp.name, "ledger_sync_status.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(payload["venues"]), ["okx"],
+                         "未配置凭证的场所仍被写成 ok，旁车对外说谎")
+
+    def test_configured_venue_still_written(self):
+        """有凭证的场所照写：过滤只针对未配置的所，不得误删真实状态。"""
+
+        class _Env:
+            simulated = True
+            configured = True
+            mode = "demo"
+            api_key = "okx-test-key"
+
+        sfl._mark("okx", "ok")
+        sfl._mark("binance", "failed", reason="timeout")
+
+        with patch("r20_backend.exchanges.venue_credentials",
+                   side_effect=[("bk", "bs"), ("gk", "gs")]):
+            sfl._write_sync_status(_Env())
+
+        payload = json.loads(
+            Path(self.tmp.name, "ledger_sync_status.json").read_text(encoding="utf-8"))
+        self.assertIn("binance", payload["venues"])
+        self.assertEqual(payload["venues"]["binance"]["status"], "failed")
+
+
 class BreakerSidecarTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

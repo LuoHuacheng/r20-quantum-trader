@@ -61,6 +61,7 @@ def resolve_entry_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
         if (ai_decision and ai_decision.get("entry_price", 0) > 0)
         else ((f.get("bidPx") if is_long else f.get("askPx")) or f["price"]),
         prec)
+    _pre_floor_limit = limit_px
     # 回踩地板：长单不得高于现价 × (1 - ratio)，空单不得低于现价 × (1 + ratio)。
     # 现价不可用（<=0）时不臆造地板，交给下方及 brackets 的几何闸门。
     try:
@@ -72,13 +73,20 @@ def resolve_entry_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
             limit_px = round(min(limit_px, _ref_px * (1.0 - MIN_ENTRY_PULLBACK_RATIO)), prec)
         else:
             limit_px = round(max(limit_px, _ref_px * (1.0 + MIN_ENTRY_PULLBACK_RATIO)), prec)
+    # 地板位移：只抬地板会造成**止损距被吃掉**。实测 BTC 08:45 那笔：
+    # 止损距 1.04%（900）→ 入场下移 740 后只剩 0.19%，正好落在提示词
+    # 反复叮嘱的“15M/5M 噪音区被插针扫损”上；同时 reward 变宽把 R:R 顶到 3.5 上限，
+    # 执行层再把止盈收窄，整笔退化为小止损小目标的噪声单。
+    # 故：AI 给了止损就把止损**同幅平移**，保住它自己验证过的 R（S: $ 风险不变，
+    # 拿到的是更好的入场价）。AI 未给止损时兵兵价已骑在 limit_px 上，无需再调。
+    _floor_shift = limit_px - _pre_floor_limit
     tp_px = round(
         ai_decision.get("take_profit_price")
         if (ai_decision and ai_decision.get("take_profit_price", 0) > 0)
         else (limit_px + tp_dist if is_long else limit_px - tp_dist),
         prec)
     sl_px = round(
-        ai_decision.get("stop_loss_price")
+        (ai_decision.get("stop_loss_price") + _floor_shift)
         if (ai_decision and ai_decision.get("stop_loss_price", 0) > 0)
         else (limit_px - sl_dist if is_long else limit_px + sl_dist),
         prec)

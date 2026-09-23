@@ -69,17 +69,17 @@ def _with_pullback_floor(limit_px, *, is_long, f, prec):
 
 
 def _expected_prices(*, is_long, ai_decision, f, prec, tp_dist, sl_dist):
-    """差分预期 = 搬走前的实现 + 上面那道地板（作用于 limit_px，再重算兑底）。"""
-    limit_px = _with_pullback_floor(
-        _legacy_prices(is_long=is_long, ai_decision=ai_decision, f=f,
-                       prec=prec, tp_dist=tp_dist, sl_dist=sl_dist)[0],
-        is_long=is_long, f=f, prec=prec)
+    """差分预期 = 搬走前的实现 + 上面那道地板（入场与 AI 止损同步平移）。"""
+    legacy_limit = _legacy_prices(is_long=is_long, ai_decision=ai_decision, f=f,
+                                  prec=prec, tp_dist=tp_dist, sl_dist=sl_dist)[0]
+    limit_px = _with_pullback_floor(legacy_limit, is_long=is_long, f=f, prec=prec)
+    shift = limit_px - legacy_limit
     tp_px = round(
         ai_decision.get("take_profit_price")
         if (ai_decision and ai_decision.get("take_profit_price", 0) > 0)
         else (limit_px + tp_dist if is_long else limit_px - tp_dist), prec)
     sl_px = round(
-        ai_decision.get("stop_loss_price")
+        (ai_decision.get("stop_loss_price") + shift)
         if (ai_decision and ai_decision.get("stop_loss_price", 0) > 0)
         else (limit_px - sl_dist if is_long else limit_px + sl_dist), prec)
     return limit_px, tp_px, sl_px
@@ -123,9 +123,10 @@ class PricesParityTest(unittest.TestCase):
                                  f={"bidPx": 100.0, "askPx": 100.5, "price": 100.0},
                                  prec=2, tp_dist=5.0, sl_dist=3.0)
             self.assertEqual(got, exp, f"is_long={is_long} 与搬走前分叉")
-            # 做多：AI 给 101.5 > 现价 100（逆势追高）→ 被回踩地板压到 98.8；
-            # 做空：AI 给 101.5 已比地板 101.2 更深 → 原样保留。“不被夺权”两向都验。
-            self.assertEqual(got, (98.8, 110.0, 95.0) if is_long else (101.5, 110.0, 95.0))
+            # 做多：AI 给 101.5 > 现价 100（逆势追高）→ 被回踩地板压到 98.8，
+            # 止损同步下移 2.7 到 92.3（保住 AI 验证过的止损距 6.5）；
+            # 做空：AI 给 101.5 已比地板 101.2 更深 → 入场与止损都原样保留。
+            self.assertEqual(got, (98.8, 110.0, 92.3) if is_long else (101.5, 110.0, 95.0))
 
     def test_venue_side_of_book_differs_by_direction(self):
         """盘口价：做多取 bidPx，做空取 askPx —— 漏改会让空单盯着买一价下单。
@@ -245,9 +246,11 @@ class PullbackFloorTest(unittest.TestCase):
         lp, tp, sl = self._call(is_long=True, entry=99.5, tp=110.0, sl=95.0)
         self.assertEqual(lp, round(self.PX * (1 - self.R), 2))
         self.assertLess(lp, 99.5)
-        # AI 给定的止盈/止损是**绝对价**，不跟着地板动
-        self.assertEqual((tp, sl), (110.0, 95.0))
-        # 地板只抬高赔率：R:R 从 2.33 升到 2.88，不会反向劣化
+        # 止损随入场同步下移，**止损距必须一字不变**：只抬入场不抬止损会把
+        # 1.04% 的止损距压成 0.19%（实测 BTC 08:45），变成插针就扫的噪音单。
+        self.assertEqual((tp, sl), (110.0, 94.3))
+        self.assertAlmostEqual(lp - sl, 99.5 - 95.0, places=6, msg="止损距被地板吃掉了")
+        # 止盈是绝对目标价（阻力位），不跟着动 —— 少付的入场钱直接兑现成赔率
         self.assertGreater((tp - lp) / (lp - sl), (110.0 - 99.5) / (99.5 - 95.0))
 
     def test_deep_entry_is_left_alone(self):

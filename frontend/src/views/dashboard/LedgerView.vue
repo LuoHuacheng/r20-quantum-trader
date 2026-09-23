@@ -39,8 +39,6 @@ const hiddenRows = ref<any[]>([]);
 const ledgerScope = computed<Record<string, any>>(
   () => (store.data as any)?._meta?.ledger_scope || {});
 const hiddenTotal = computed<number>(() => Number(ledgerScope.value?.hidden) || 0);
-const hiddenForeign = computed<number>(() => Number(ledgerScope.value?.hidden_foreign) || 0);
-const hiddenLegacy = computed<number>(() => Number(ledgerScope.value?.hidden_legacy) || 0);
 
 const scopedTrades = computed<any[]>(() => (store.data as any)?.trades || []);
 const all = computed<any[]>(() =>

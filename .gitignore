@@ -70,6 +70,10 @@ data/*.xlsx
 data/*.csv
 data/*.lock
 data/*.tmp
+# ⚠️ 原子写的**mkstemp 孤儿**：`tempfile.mkstemp(dir=DATA_DIR)` 默认名是 `tmpXXXXXXXX`
+# （无后缀），上面那条 `data/*.tmp` **匹配不到** —— 实测一小时内现场留下 51 个
+# 孤儿（council_config 的写临时件，共 513 KB），`git add -A` 会当新文件收进提交。
+data/tmp*
 data/*.bak
 data/*.enc
 data/*.txt

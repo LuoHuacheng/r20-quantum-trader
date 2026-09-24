@@ -62,10 +62,36 @@ def _normalize(node: ast.AST) -> str:
     return ast.dump(node, include_attributes=False)
 
 
+#: ⚠️ **文档化差异**（第一百四十四刀新增本表）：本门要求搬运后函数体逐字，
+#: 表外任何改动照旧翻红；表内差异在比较前先把"新文本"还原成"旧文本"。
+#:
+#: 本刀唯一一条：`is_circuit_breaker_active` 里把"台账同步旁车**不可判定**"
+#: （旁车损坏/过旧）**如实披露**出来。旧 docstring 声称这类场景由 ledger 的
+#: file_health STALE 通道兜底，但两个调用方都没有该检查（全仓 grep 只命中那句注释）
+#: ⇒ 补偿不存在。用户拍板 **fail-closed**：不可判定 ⇒ 禁开仓（可见 + 有行为）。
+DELTA_REWRITES = (
+    ("""            from r20_backend.execution.circuit_breaker import (
+                _ledger_sync_sidecar_state as _sidecar_state)
+            _failed_venues, _sidecar_unknown = _sidecar_state()
+            if _sidecar_unknown:
+                # 与模块版同源（第一百四十四刀，用户拍板 fail-closed）：不可判定 ⇒ 禁开仓
+                return True, (f"台账同步状态不可判定（{_sidecar_unknown}）⇒ "
+                              "当日亏损求和不可判全，安全暂停开仓")
+""",
+     """            _failed_venues = _ledger_sync_failed_venues()
+"""),
+)
+
+
 class CircuitGuardVerbatimTest(unittest.TestCase):
     def test_moved_bodies_match_pre_extraction_except_injections(self):
         old = ast.parse(_src(PRE, "scripts/ai_factor_trader.py"))
-        new = ast.parse((ROOT / "scripts/trader/circuit_guard.py").read_text(encoding="utf-8"))
+        mod_src = (ROOT / "scripts/trader/circuit_guard.py").read_text(encoding="utf-8")
+        for _new_tok, _old_tok in DELTA_REWRITES:
+            self.assertEqual(mod_src.count(_new_tok), 1,
+                             f"文档化差异锚点没找到或重复：{_new_tok[:60]!r}")
+            mod_src = mod_src.replace(_new_tok, _old_tok)
+        new = ast.parse(mod_src)
         for fn in ("check_black_swan_sentinel", "is_circuit_breaker_active"):
             with self.subTest(fn=fn):
                 # 原有**位置参数**必须原样（新函数只允许追加 kw-only 注入参数）

@@ -78,6 +78,64 @@ function posRoi(p: any): number {
 function ocoOk(p: any): boolean {
   return p.cloud_oco_verified !== false && p.protectionStatus !== 'unprotected';
 }
+/** 孤儿腿候选数（可归因：本方标签或台账同向同量已平记录）——**只报告**，撤销是显式运营动作。 */
+function orphanCandidates(p: any): number {
+  const o = p?.protectionOrphans;
+  const sym = String(p?.name || p?.base || '').toUpperCase();
+  const list = o && o.readable ? (o.attributed || []) : [];
+  return (sym ? list.filter((x: any) => String(x.symbol || '').toUpperCase() === sym) : (o && o.readable ? o.attributed || [] : [])).length;
+}
+/** 归属不可判定的孤儿腿数（按纪律一律不碰）。 */
+function orphanUnattributed(p: any): number {
+  const o = p?.protectionOrphans;
+  const sym = String(p?.name || p?.base || '').toUpperCase();
+  const list = o && o.readable ? (o.unattributed || []) : [];
+  return (sym ? list.filter((x: any) => String(x.symbol || '').toUpperCase() === sym) : (o && o.readable ? o.unattributed || [] : [])).length;
+}
+/** 方向或量与任何持仓都对不上的腿数（方向不符的不计覆盖；量不符的仍计覆盖）。 */
+function orphanMismatch(p: any): number {
+  const o = p?.protectionOrphans;
+  if (!o || !o.readable) return 0;
+  const sym = String(p?.name || p?.base || '').toUpperCase();
+  const filterList = (arr: any[]) => sym ? arr.filter((x: any) => String(x.symbol || '').toUpperCase() === sym) : arr;
+  return filterList(o.sideMismatch || []).length + filterList(o.sizeMismatch || []).length;
+}
+/** 读到了但认不出的腿数（认不出类型 + 行解析不了）：**不计入覆盖** ⇒ 覆盖可能被低估。 */
+function orphanUnclassified(p: any): number {
+  const o = p?.protectionOrphans;
+  if (!o || !o.readable) return 0;
+  return (o.foreignCount || 0) + (o.unparsedCount || 0);
+}
+/** 读腿失败 ⇒ 不可判定（**不是**没有孤儿腿）。 */
+function orphanReadFailed(p: any): boolean {
+  return !!p?.protectionOrphans && p.protectionOrphans.readable === false;
+}
+/** 保护腿触发价类型 → 短标签（`''` = 没有该类腿/后端未给 ⇒ **不显示**，不编）。 */
+function slTriggerType(p: any): string {
+  const v = String(p?.protectionSlTriggerPxType ?? '').toLowerCase();
+  if (v === 'mark') return t('dash.matrix.positions.triggerMark');
+  if (v === 'last') return t('dash.matrix.positions.triggerLast');
+  if (v === 'index') return t('dash.matrix.positions.triggerIndex');
+  // Binance 的自描述字面量（MARK_PRICE / CONTRACT_PRICE）
+  if (v === 'mark_price') return t('dash.matrix.positions.triggerMarkPrice');
+  if (v === 'contract_price') return t('dash.matrix.positions.triggerContractPrice');
+  // Gate 的数字码：**原样显示**（本仓未核实官方映射 ⇒ 不翻译，避免编一个中文名）
+  if (v.startsWith('price_type:')) return v;
+  if (v === 'unknown') return t('dash.matrix.positions.triggerUnknown');
+  return '';
+}
+/** 悬停说明：为什么这件事重要（`last` 一根插针就能提前打掉保护）。 */
+function slTriggerTypeHint(p: any): string {
+  const v = String(p?.protectionSlTriggerPxType ?? '').toLowerCase();
+  if (v === 'mark') return t('dash.matrix.positions.triggerMarkHint');
+  if (v === 'last') return t('dash.matrix.positions.triggerLastHint');
+  if (v === 'index') return t('dash.matrix.positions.triggerIndexHint');
+  if (v === 'mark_price') return t('dash.matrix.positions.triggerMarkHint');
+  if (v === 'contract_price') return t('dash.matrix.positions.triggerLastHint');
+  if (v.startsWith('price_type:')) return t('dash.matrix.positions.triggerRawCodeHint');
+  if (v === 'unknown') return t('dash.matrix.positions.triggerUnknownHint');
+  return '';
+}
 function orderDir(o: any): 'long' | 'short' {
   return String(o.posSide || (o.side === 'buy' ? 'long' : 'short')).toLowerCase() as any;
 }
@@ -102,9 +160,39 @@ function orderQtyText(o: any): string {
   return fmtNum(n, 0);
 }
 
-function orderUnitText(o: any): string {
+function orderNativeUnit(o: any): string {
   const v = getVenueOf(o);
-  return v === 'binance' ? symOf(o) : t('dash.matrix.orders.col.qty');
+  return v === 'binance' ? symOf(o) : t('dash.matrix.orders.contractsUnit');
+}
+
+/**
+ * 挂单保证金（USDT）——**唯一权威是后端**。
+ *
+ * 后端按各所合约面值（`instrument_pool.ctVal`）与杠杆算好后放进 `margin_usdt`
+ * （见 `dashboard_payload/order_view.py` 与 `multi_venue.py`）。前端**绝不**自己
+ * 维护面值表：那种表一旦与池子漂移，屏幕上就会显示一个凭空捏造的保证金数字，
+ * 而保证金正是交易员判断仓位大小的依据 —— 宁可显示原生张数，也不给假数字。
+ *
+ * 返回 0 表示"后端没给"（旧数据/字段缺失）→ 调用方回落到原生张数展示。
+ */
+function orderMargin(o: any): number {
+  const m = Number(o?.margin_usdt);
+  return Number.isFinite(m) && m > 0 ? m : 0;
+}
+
+function orderMarginText(o: any): string {
+  const m = orderMargin(o);
+  if (m > 0) {
+    return `${fmtNum(m, 2)}U`;
+  }
+  const raw = orderQtyText(o);
+  return raw !== '--' ? `${raw} ${orderNativeUnit(o)}` : '--';
+}
+
+function orderTooltipText(o: any): string {
+  const m = orderMargin(o);
+  const native = `${orderQtyText(o)} ${orderNativeUnit(o)}`;
+  return m > 0 ? `${t('dash.matrix.orders.col.qty')} ${fmtNum(m, 2)}U (${native})` : native;
 }
 </script>
 
@@ -215,7 +303,14 @@ function orderUnitText(o: any): string {
               <span class="text-3xs block" :class="posPnl(p) >= 0 ? 'text-[var(--up)]' : 'text-[var(--down)]'">{{ fmtPct(posRoi(p)) }}</span>
             </td>
             <td class="col-num font-mono text-3xs">
-              <span class="down block">SL {{ fmtPrice(p.exchangeSl ?? p.displayStop) }}</span>
+              <span class="down block">
+                SL {{ fmtPrice(p.exchangeSl ?? p.displayStop) }}
+                <span
+                  v-if="slTriggerType(p)"
+                  class="text-3xs text-[var(--ink-2)]"
+                  :title="slTriggerTypeHint(p)"
+                >· {{ slTriggerType(p) }}</span>
+              </span>
               <span v-if="getTp1(p)" class="up block font-medium" :title="p.stageDesc || t('dash.matrix.positions.scaleOutTitle')">
                 TP1 {{ fmtPrice(getTp1(p)) }}
               </span>
@@ -224,6 +319,28 @@ function orderUnitText(o: any): string {
               </span>
             </td>
             <td class="text-center">
+              <span
+                v-if="orphanCandidates(p) > 0"
+                class="inline-flex items-center gap-1 text-3xs text-[var(--warn,#f59e0b)]"
+                :title="t('dash.matrix.positions.orphanHint')"
+              >⚠ {{ t('dash.matrix.positions.orphanPill') }} {{ orphanCandidates(p) }}</span>
+              <span
+                v-else-if="orphanUnattributed(p) > 0 || orphanReadFailed(p)"
+                class="inline-flex items-center gap-1 text-3xs text-[var(--ink-2)]"
+                :title="orphanReadFailed(p)
+                  ? t('dash.matrix.positions.orphanReadFailHint')
+                  : t('dash.matrix.positions.orphanUnknownHint')"
+              >{{ t('dash.matrix.positions.orphanUnknownPill') }}</span>
+              <span
+                v-if="orphanUnclassified(p) > 0"
+                class="inline-flex items-center gap-1 text-3xs text-[var(--ink-2)]"
+                :title="t('dash.matrix.positions.unclassifiedHint')"
+              >{{ t('dash.matrix.positions.unclassifiedPill') }} {{ orphanUnclassified(p) }}</span>
+              <span
+                v-if="orphanMismatch(p) > 0"
+                class="inline-flex items-center gap-1 text-3xs text-[var(--ink-2)]"
+                :title="t('dash.matrix.positions.mismatchHint')"
+              >{{ t('dash.matrix.positions.mismatchPill') }} {{ orphanMismatch(p) }}</span>
               <span
                 v-if="ocoOk(p)"
                 class="inline-flex items-center gap-1 text-3xs text-[var(--up)]"
@@ -294,8 +411,8 @@ function orderUnitText(o: any): string {
               {{ fmtPrice(o.px) }}
             </td>
             <td class="col-num font-mono">
-              <span class="block text-xs font-medium text-[var(--ink-strong)]" :title="`${orderQtyText(o)} ${orderUnitText(o)}`">
-                {{ orderQtyText(o) }}<span class="text-4xs text-[var(--ink-3)] ml-0.5">{{ orderUnitText(o) }}</span>
+              <span class="block text-xs font-medium text-[var(--ink-strong)]" :title="orderTooltipText(o)">
+                {{ orderMarginText(o) }}
               </span>
               <span class="block text-3xs text-[var(--ink-2)]">{{ o.lever || '3x' }}</span>
             </td>

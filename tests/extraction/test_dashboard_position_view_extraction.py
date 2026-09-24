@@ -18,6 +18,9 @@
 
 与搬走前内联实现逐字段对比，**用随机输入**驱动，覆盖 `-1`/`0`/缺失/字符串等
 边界（OKX 字段常以字符串形式返回，或整段缺失）。
+
+**文档化差异**（第一百二十三刀）：净持仓模式（`posSide` 非 long/short 或缺失）
+时，展示用 side 由带符号持仓量归一 —— 见 `_doc_delta`。
 """
 
 from __future__ import annotations
@@ -99,6 +102,17 @@ def _legacy(pos_data, positions, trackers, *, load_instruments):
             if lever_val <= 0:
                 lever_val = 3.0
             margin_usdt_val = round(okx_imr if okx_imr > 0 else (notional_usdt / lever_val), 2)
+            # US-003 环境轴贯通（后来补的纯附加字段）：持仓行必须标明 DEMO/LIVE，
+            # 否则前端会把模拟仓当实盘展示。参照实现同步补齐 —— 只加键、不改
+            # 任何既有取数口径，故差分的意义不受影响。
+            try:
+                from scripts.okx_runtime import current_environment
+                _okx_env = current_environment()
+                _acc_mode = "DEMO" if _okx_env.simulated else "LIVE"
+                _env_mode = _okx_env.mode.lower()
+            except Exception:
+                _acc_mode = "DEMO"
+                _env_mode = "demo"
             positions.append({
                 "venue": "okx", "exchange": "okx",
                 "instId": p.get("instId"),
@@ -127,6 +141,41 @@ def _both(pos_data, trackers=None):
     ga = collect_position_rows(pos_data, a, trackers, load_instruments=lambda: INSTRUMENTS)
     gb = _legacy(pos_data, b, trackers, load_instruments=lambda: INSTRUMENTS)
     return a, ga, b, gb
+
+
+def _doc_delta(data, legacy_rows, legacy_counts):
+    """把**旧实现**的输出按文档化差异改写成新实现应有的输出。
+
+    差异规则（与 `position_view.collect_position_rows` 同源，逐字对应）：
+    `posSide` 既不含 long 也不含 short 时，展示用 `posSide`/`side` 取
+    `"long" if 带符号持仓量 > 0 else "short"`；多空计数随之。
+    """
+    if not isinstance(data, list):
+        return legacy_rows, legacy_counts
+    out_rows, lc, sc = [], 0, 0
+    i = 0
+    for p in data:
+        pos_val = float(p.get("pos", 0.0) or 0.0)
+        if pos_val == 0.0:
+            continue
+        row = dict(legacy_rows[i])
+        i += 1
+        raw = str(p.get("posSide") or p.get("side") or "").lower()
+        if "long" not in raw and "short" not in raw:
+            side = "long" if pos_val > 0 else "short"
+            row["posSide"] = side
+            row["side"] = side
+            # ⚠️ side 派生的**展示**字段也要一起改：`strategyTag` 的默认值按 side 取
+            # （`"🌊 低吸" if "long" in pos_side else "⚡ 高空"`）—— 随机差分正是靠这条
+            # 抓到我第一版差异助手漏了它。tracker 里的 `strategy_tag` 优先，保持不动。
+            if str(row.get("strategyTag") or "").startswith(("🌊", "⚡")):
+                row["strategyTag"] = "🌊 低吸" if side == "long" else "⚡ 高空"
+        out_rows.append(row)
+        if "long" in str(row["posSide"]):
+            lc += 1
+        elif "short" in str(row["posSide"]):
+            sc += 1
+    return out_rows, (lc, sc, legacy_counts[2])
 
 
 def _pos(**over):
@@ -159,10 +208,34 @@ class FieldTest(unittest.TestCase):
         self.assertEqual(sc, 1)
         self.assertEqual(rows[0]["posSide"], "short")
 
-    def test_net_side_counted_as_neither(self):
-        """`net` 模式既不含 long 也不含 short → 两个计数都不加。"""
-        _, (lc, sc, _), _, _ = _both([_pos(posSide="net")])
-        self.assertEqual((lc, sc), (0, 0))
+    def test_net_side_is_normalised_from_signed_size(self):
+        """第一百二十三刀改判：`net`（净持仓模式）按**带符号持仓量**归一为多/空。
+
+        旧行为是"既不含 long 也不含 short ⇒ 两个计数都不加"，于是
+        ①多空计数偏小；②行里 `posSide`/`side` 留成 `"net"` ⇒ 下游
+        （提示词 `方向:` 与极值分支、factors 策略标签）把**净多头当空头**。
+        """
+        rows, (lc, sc, _), _, _ = _both([_pos(posSide="net", pos="3")])
+        self.assertEqual((lc, sc), (1, 0), "净多头必须计入多头")
+        self.assertEqual(rows[0]["posSide"], "long")
+        self.assertEqual(rows[0]["side"], "long")
+
+        rows, (lc, sc, _), _, _ = _both([_pos(posSide="net", pos="-2.5")])
+        self.assertEqual((lc, sc), (0, 1), "净空头必须计入空头")
+        self.assertEqual(rows[0]["posSide"], "short")
+
+    def test_missing_side_is_also_normalised(self):
+        """字段整段缺失（同样非 long/short）⇒ 也按符号归一。"""
+        rows, (lc, sc, _), _, _ = _both([_pos(posSide="", pos="3")])
+        self.assertEqual((lc, sc), (1, 0))
+        self.assertEqual(rows[0]["side"], "long")
+
+    def test_display_side_is_never_net(self):
+        """契约：持仓行的 `posSide`/`side` 只允许 long/short（消费者据此分方向）。"""
+        for raw in ("net", "", "NET", "both"):
+            rows, _, _, _ = _both([_pos(posSide=raw, pos="3")])
+            self.assertIn(rows[0]["side"], ("long", "short"), f"raw={raw!r}")
+            self.assertIn(rows[0]["posSide"], ("long", "short"), f"raw={raw!r}")
 
     def test_total_upl_sums(self):
         _, (_, _, upl), _, _ = _both([_pos(upl="10"), _pos(upl="-3.5")])
@@ -385,8 +458,12 @@ class RandomParityTest(unittest.TestCase):
             if data and rng.random() < 0.5:
                 trackers["BTC-USDT-SWAP_long"] = {"trailingStopPx": 1, "tp1_hit": True}
             a, ga, b, gb = _both(data, trackers)
-            self.assertEqual(a, b, f"行分叉: {data}")
-            self.assertEqual(ga, gb, f"计数分叉: {data}")
+            # ⚠️ **文档化差异**（第一百二十三刀）：净持仓模式（`posSide` 既非 long
+            # 也非 short，含缺失）时，展示用 side 由**带符号持仓量**归一，旧实现原样
+            # 透传（"net"/""）。差异**只**落在这些行与多空计数上，其余逐字段一致。
+            exp_rows, exp_counts = _doc_delta(data, b, gb)
+            self.assertEqual(a, exp_rows, f"行分叉（超出文档化差异）: {data}")
+            self.assertEqual(ga, exp_counts, f"计数分叉（超出文档化差异）: {data}")
 
     def test_non_list_input(self):
         for bad in (None, 42, "x", {}):

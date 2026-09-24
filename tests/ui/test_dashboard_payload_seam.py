@@ -335,5 +335,207 @@ class ShellDisciplineTests(unittest.TestCase):
         self.assertTrue(str(app.DATA_DIR).endswith("data") or "data" in str(app.DATA_DIR))
 
 
+class ReaderFamilyFailureSemanticsTest(unittest.TestCase):
+    """面板侧**读取器家族**：缺失静默、读不出来必披露（第一百四十九刀）。
+
+    缺陷形状：`readers.read_json` / `read_text` / `read_text_lines` 旧实现都是
+    "任何失败 ⇒ 默认值/空"（`except (OSError, ValueError, UnicodeDecodeError): return default`），
+    而同一模块里我在第 52 刀刚给 `load_json_dict_disclosed` 补了披露 ⇒ **一个模块两套失败语义**，
+    正是本仓反复吃过的"同一语义两处写"。这些读取器喂的是面板区块（AI 决策、因子库、
+    复盘报告、快讯、日志尾），静默失败等于把"读坏了"渲染成"确实没有"。
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory(prefix="reader-family-")
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def _corrupt(self, name, text="{ 半截"):
+        f = self.base / name
+        f.write_text(text, encoding="utf-8")
+        return f
+
+    def test_json_reader_discloses_corrupt_but_is_silent_when_missing(self):
+        import io
+        from contextlib import redirect_stdout
+        from r20_backend.dashboard_payload.readers import read_json
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            missing = read_json(self.base / "nope.json", {"d": 1})
+        self.assertEqual(missing, {"d": 1})
+        self.assertEqual(buf.getvalue(), "", "文件不存在是合法空态，不应吵")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            broken = read_json(self._corrupt("broken.json"), {"d": 1})
+        self.assertEqual(broken, {"d": 1})
+        self.assertIn("[面板] warn", buf.getvalue())
+        self.assertIn("请勿据此判断", buf.getvalue())
+
+    def test_text_reader_discloses_corrupt_but_is_silent_when_missing(self):
+        import io
+        from contextlib import redirect_stdout
+        from r20_backend.dashboard_payload.readers import read_text
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(read_text(self.base / "nope.txt", "d"), "d")
+        self.assertEqual(buf.getvalue(), "")
+        # 目录不是可读文本：存在但读不出来 ⇒ 必披露
+        (self.base / "adir").mkdir()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(read_text(self.base / "adir", "d"), "d")
+        self.assertIn("[面板] warn", buf.getvalue())
+
+    def test_text_lines_reader_discloses_corrupt_but_is_silent_when_missing(self):
+        import io
+        from contextlib import redirect_stdout
+        from r20_backend.dashboard_payload.readers import read_text_lines
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(read_text_lines(self.base / "nope.log", 10), [])
+        self.assertEqual(buf.getvalue(), "")
+        (self.base / "adir").mkdir()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(read_text_lines(self.base / "adir", 10), [])
+        self.assertIn("[面板] warn", buf.getvalue())
+        # 正常读取不得吵，且语义不变（strip / limit）
+        f = self.base / "ok.log"
+        f.write_text("a\n\n b \nc\n", encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(read_text_lines(f, 2), ["b", "c"])
+        self.assertEqual(buf.getvalue(), "")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class DisclosedJsonReaderTest(unittest.TestCase):
+    """面板侧读取必须**披露**而非静默返回空（第 52 刀）。
+
+    背景：同一个"读追踪器"语义此前有**两份实现**（`factors` 吃文件路径、
+    `ledger_view` 吃目录），且两份都是 `except Exception: return {}` ——
+    本仓两个经典坑叠在一起：*同一语义两处写 ⇒ 必然漂移* + *读不到被渲染成"没有"*。
+    本刀收敛到共享读取器并补披露（返回值不变，保持兼容）。
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory(prefix="disclosed-read-")
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def test_shared_reader_distinguishes_missing_from_unreadable(self):
+        import io
+        from contextlib import redirect_stdout
+        from r20_backend.dashboard_payload.readers import load_json_dict_disclosed
+        missing = self.base / "nope.json"
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            data, err = load_json_dict_disclosed(missing)
+        self.assertEqual((data, err), ({}, ""))
+        self.assertEqual(buf.getvalue(), "", "文件不存在是合法空态，不应吵")
+
+        broken = self.base / "broken.json"
+        broken.write_text("{ 半截", encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            data, err = load_json_dict_disclosed(broken)
+        self.assertEqual(data, {})
+        self.assertTrue(err, "读不出来必须给出原因（返回值不变，但要能区分）")
+        self.assertIn("[面板] warn", buf.getvalue())
+        self.assertIn("请勿据此判断", buf.getvalue(), "披露必须点明'空不等于没有'")
+
+    def test_non_dict_json_is_reported_not_silently_emptied(self):
+        import io
+        from contextlib import redirect_stdout
+        from r20_backend.dashboard_payload.readers import load_json_dict_disclosed
+        f = self.base / "list.json"
+        f.write_text("[1, 2, 3]", encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            data, err = load_json_dict_disclosed(f)
+        self.assertEqual(data, {})
+        self.assertIn("顶层应为 dict", err)
+        self.assertIn("形状", buf.getvalue())
+
+    def test_valid_dict_returns_data_without_noise(self):
+        import io
+        import json as _json
+        from contextlib import redirect_stdout
+        from r20_backend.dashboard_payload.readers import load_json_dict_disclosed
+        f = self.base / "ok.json"
+        f.write_text(_json.dumps({"BTC-USDT-SWAP_long": {"scale_count": 1}}), encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            data, err = load_json_dict_disclosed(f)
+        self.assertEqual(err, "")
+        self.assertEqual(data["BTC-USDT-SWAP_long"]["scale_count"], 1)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_both_tracker_loaders_agree_and_both_disclose(self):
+        """防漂移的行为钉：两份实现（路径版 / 目录版）对同一输入必须一致。"""
+        import io
+        from contextlib import redirect_stdout
+        from r20_backend.dashboard_payload.factors import load_position_trackers as by_path
+        from r20_backend.dashboard_payload.ledger_view import load_position_trackers as by_dir
+        (self.base / "position_trackers.json").write_text("{ 坏", encoding="utf-8")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            a = by_path(str(self.base / "position_trackers.json"))
+            b = by_dir(str(self.base))
+        self.assertEqual(a, b, "两份实现已经漂移（同输入不同结果）")
+        self.assertEqual(a, {})
+        self.assertGreaterEqual(buf.getvalue().count("[面板] warn"), 2,
+                                "两份实现都必须披露，而不是只有一份")
+
+    def test_multi_venue_fallback_discloses_instead_of_silently_empty(self):
+        """源码钉：多所组合的兜底分支必须带披露语（此前是静默 `return {}`）。"""
+        src = (Path(__file__).resolve().parents[2] / "r20_backend" / "dashboard_payload"
+               / "market.py").read_text(encoding="utf-8")
+        self.assertIn("多所组合读取失败", src)
+        self.assertIn("请勿据此判断", src)
+
+class ScaleOutSurfacedFromTrackerTest(unittest.TestCase):
+    """切分止盈状态必须从 tracker 接到持仓行上（第一百九十八刀）。
+
+    背景：`frontend/.../PositionsOrdersPanel.vue` 一直读 `p.scaleOutPhase`（决定切分徽标）
+    与 `p.scaleOutTp`（决定 TP 显示），而这两个键**后端从未发过** —— 数据其实一直在
+    tracker 里（`scripts/trader/scale_out.py` 写 `scale_out_phase`/`scale_out_tp`），
+    只是没被接出来 ⇒ 徽标永远不亮。
+    """
+
+    def setUp(self):
+        from r20_backend.dashboard_payload.factors import enrich_position_risk_fields
+        self.enrich = enrich_position_risk_fields
+
+    def _pos(self, inst="X-USDT-SWAP", side="long"):
+        return [{"instId": inst, "posSide": side, "pos": "10", "markPx": "2.0", "lever": "5"}]
+
+    def test_tracker_scale_out_state_reaches_the_row(self):
+        trackers = {"X-USDT-SWAP_long": {"scale_out_phase": 1, "scale_out_tp": 2.34}}
+        row = self.enrich("unused.json", self._pos(), trackers)[0]
+        self.assertEqual(row.get("scaleOutPhase"), 1)
+        self.assertAlmostEqual(row.get("scaleOutTp"), 2.34)
+
+    def test_absent_state_stays_absent_not_zero(self):
+        """**缺席即缺席**：没 tracker 就不写这两个键 —— 写成 0 等于替币安/Gate 行
+        断言"切分未开始"（读不到 ≠ 没有）。"""
+        rows = self.enrich("unused.json", self._pos("Y-USDT-SWAP"), {})
+        self.assertNotIn("scaleOutPhase", rows[0])
+        self.assertNotIn("scaleOutTp", rows[0])
+
+    def test_producer_and_consumer_names_agree(self):
+        """源码钉：tracker 侧写 `scale_out_phase`、行上给 `scaleOutPhase` —— 两侧名字都必须真实存在。"""
+        root = Path(__file__).resolve().parents[2]
+        producer = (root / "scripts" / "trader" / "scale_out.py").read_text(encoding="utf-8")
+        self.assertIn('t["scale_out_phase"]', producer)
+        self.assertIn('t["scale_out_tp"]', producer)
+        facet = (root / "r20_backend" / "dashboard_payload" / "factors.py").read_text(encoding="utf-8")
+        self.assertIn('"scaleOutPhase"', facet)
+        self.assertIn('"scaleOutTp"', facet)
+        ui = (root / "frontend" / "src" / "components" / "dashboard"
+              / "PositionsOrdersPanel.vue").read_text(encoding="utf-8")
+        self.assertIn("scaleOutPhase", ui)
+        self.assertIn("scaleOutTp", ui)

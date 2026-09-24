@@ -1,6 +1,6 @@
 # `r20_backend/` 分层与归档约定
 
-> 本文是**约定文档，不是目录搬迁计划**。结构优化研究（`plan_local/R20_STRUCTURE_OPTIMIZATION_20260914.md`
+> 本文是**约定文档，不是目录搬迁计划**。结构优化研究（`plan_local/records/structure-01.md`
 > §2 B7 / §10.5）得出的结论是：**不为目录整齐去搬已上线的启动路径模块**，
 > 而是把"哪个模块属于哪一层、新文件该进哪个子包"固化成文字约定。
 > 读完这一页，你应该能在 30 秒内回答"我这个新文件该放哪"。
@@ -80,6 +80,7 @@
 | 组合与账户 | `portfolio_aggregator.py`、`account_baseline.py` |
 | 提示词 | `prompt_views.py`、`dashboard_payload/prompts*` |
 | 通用 | `time_utils.py`、`math_utils.py`、`schemas.py`、`schedule_store.py` |
+| 可观测性 | `metrics.py`（Prometheus 文本 exposition 的唯一渲染点；路由薄壳在 `routers/system.py::admin_metrics`） |
 
 ### L4 纯计算/载荷子包（新代码的默认去处）
 
@@ -162,7 +163,7 @@
 ## 6. 每次拆分后必须过的两道闸
 
 ```bash
-# 1) 全量套件（当前基线：3133 例 OK, skipped=1）
+# 1) 全量套件（当前基线：10370 例 OK, skipped=1）
 #    ⚠️ 这个数字由 tests/core/test_readme_baseline_numbers.py 钉住：
 #    它用 AST 数出仓里 test_* 方法数，再要求本行数字与之同量级。
 #    超过 ±10% 就会翻红 —— 忘了更新这里会当场被抓住，不会静默漂移。

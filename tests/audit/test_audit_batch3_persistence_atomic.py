@@ -316,5 +316,138 @@ class TestVenueHealthAndStateAtomicSource(unittest.TestCase):
         self.assertIn('_atomic_write_json(os.path.join(DATA_DIR, "trading_state.json")', trader)
 
 
+class TraderSlotGuardAtomicityTest(unittest.TestCase):
+    """同槽去重守卫：**原子写 + 读不到要吼**（第一百三十六刀）。
+
+    背景：`single_trader_cycle` 的守卫此前内联在装饰器里，两处语义无法单独测试：
+    ①写用非原子 `open(..., "w")`（先截断再写）⇒ 写崩留 0 字节/半截 JSON；
+    ②读分支 `except Exception: pass` **静默**吞掉损坏 ⇒ 同槽去重**静默失效**
+    （同一 15 分钟槽可能跑两轮、重复处理同一批信号）。现抽成
+    `_slot_guard_should_skip` 并用本模块既有的 `_atomic_write_json`。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="slot-guard-")
+        self.addCleanup(self.tmp.cleanup)
+        self.slot = os.path.join(self.tmp.name, "slot.json")
+
+    def _guard(self, now_slot):
+        import scripts.ai_factor_trader as aft
+        with patch.object(aft, "TRADER_SLOT_FILE", self.slot):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                skip = aft._slot_guard_should_skip(now_slot)
+        return skip, buf.getvalue()
+
+    def _write(self, text):
+        with open(self.slot, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_first_sight_allows_and_records(self):
+        skip, out = self._guard(1000)
+        self.assertFalse(skip)
+        with open(self.slot, encoding="utf-8") as f:
+            state = json.load(f)
+        self.assertEqual(state["slot"], 1000)
+        self.assertEqual(out, "", "正常路径不该刷告警")
+
+    def test_same_slot_recent_trigger_is_skipped(self):
+        self._guard(1000)
+        skip, out = self._guard(1000)
+        self.assertTrue(skip, "同槽 + 刚启动 ⇒ 必须判为重复触发")
+        self.assertIn("duplicate trigger", out)
+
+    def test_unreadable_state_warns_loudly_and_still_runs(self):
+        """读不到 ⇒ **仍放行**（不因一个状态文件停实盘），但绝不静默。"""
+        self._write("{ 这不是 JSON")
+        skip, out = self._guard(2000)
+        self.assertFalse(skip, "不因状态文件损坏而停交易（可用性优先，但要吼）")
+        self.assertIn("同槽去重状态不可读", out, "损坏必须吼出来，不得静默 pass")
+        with open(self.slot, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["slot"], 2000, "随后应原子覆写成合法状态（自愈）")
+
+    def test_write_crash_preserves_previous_state(self):
+        """写崩 ⇒ 旧状态**字节级原样**（非原子直写会先截断，守卫就此失效）。"""
+        good = json.dumps({"slot": 7, "started_at": 1, "pid": 1})
+        self._write(good)
+        import scripts.ai_factor_trader as aft
+        with patch.object(aft, "TRADER_SLOT_FILE", self.slot), \
+                patch("os.replace", side_effect=OSError("模拟写崩")), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(OSError):
+                aft._slot_guard_should_skip(3000)
+        with open(self.slot, encoding="utf-8") as f:
+            self.assertEqual(f.read(), good, "写崩必须保全旧状态（绝不截断）")
+        self.assertEqual([n for n in os.listdir(self.tmp.name) if n != "slot.json"], [],
+                         "失败路径不得残留临时文件")
+
+
+class StopCooldownWriterSingleSourceTest(unittest.TestCase):
+    """止损冷却**写入规则只有一处实现**（第一百四十八刀）。
+
+    历史：读取路径早已收敛（结构优化 4·B3 第五十刀），**写入**却留了两份等价实现
+    （`r20_backend/execution/circuit_breaker.py` 与 `scripts/ai_factor_trader.py`），
+    只差一句提示文案 —— 本仓老毛病"同一语义两处写 ⇒ 必然漂移"。此处漂移的代价很实：
+    冷却登记规则一变，两进程可能一个记一个不记，而"止损后能否立刻反手"直接取决于它。
+
+    本门钉两件事：①两个公开入口都必须是**薄壳**（转调同一实现）；②单一实现的三条规则
+    逐条成立（损坏拒绝写回 / 正常写入 schema / 落盘失败只告警）。
+    """
+
+    def test_both_entrypoints_are_shells_over_one_implementation(self):
+        import ast
+        import r20_backend.execution.circuit_breaker as cb
+        root = Path(__file__).resolve().parents[2]
+        for path, mod in ((root / "r20_backend" / "execution" / "circuit_breaker.py", cb),
+                          (root / "scripts" / "ai_factor_trader.py", None)):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            fn = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef) and n.name == "add_stop_cooldown")
+            with self.subTest(path=path.name):
+                body = [n for n in fn.body
+                        if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                                and isinstance(n.value.value, str))]      # 去掉 docstring
+                self.assertEqual(len(body), 1, "写入规则又长回函数体里了（应转调单一事实源）")
+                only = body[0]
+                self.assertIsInstance(only, ast.Return)
+                call = only.value
+                self.assertIsInstance(call, ast.Call)
+                self.assertEqual(getattr(call.func, "id", ""), "_cooldowns_add",
+                                 "薄壳必须转调 cooldowns.add_stop_cooldown")
+
+    def test_rules_of_the_single_implementation(self):
+        import json as _json
+        import tempfile
+        from r20_backend.execution import cooldowns as cd
+        with tempfile.TemporaryDirectory(prefix="cd-single-") as td:
+            f = os.path.join(td, "stop_cooldown.json")
+            written = []
+            logs = []
+            log = logs.append
+            # 规则①：状态损坏 ⇒ **拒绝写回**（保全现场），且必吼
+            with open(f, "w") as h:
+                h.write("{half")
+            cd.add_stop_cooldown("BTC-USDT-SWAP", "long", f,
+                                 atomic_write_json=lambda p, d: written.append((p, d)), log=log)
+            self.assertEqual(written, [], "损坏现场被覆盖了（读取侧按『仍在冷却』兜底，写入侧不许毁现场）")
+            self.assertTrue(any("CRITICAL" in m for m in logs), "拒绝写回必须吼出来")
+            self.assertEqual(open(f).read(), "{half", "现场必须原封不动")
+            # 规则②：正常写入的 schema
+            with open(f, "w") as h:
+                h.write(_json.dumps({}))
+            cd.add_stop_cooldown("ETH-USDT-SWAP", "short", f, reason="测试冷却",
+                                 atomic_write_json=lambda p, d: written.append((p, d)), log=log)
+            self.assertEqual(len(written), 1)
+            path_written, payload = written[0]
+            self.assertEqual(path_written, f)
+            self.assertEqual(set(payload["ETH-USDT-SWAP_short"]),
+                             {"instId", "side", "ts", "reason"})
+            self.assertEqual(payload["ETH-USDT-SWAP_short"]["reason"], "测试冷却")
+            # 规则③：落盘失败 ⇒ 只告警，不抛（绝不打断平仓流程）
+            def boom(p, d):
+                raise OSError("磁盘满")
+            cd.add_stop_cooldown("SOL-USDT-SWAP", "long", f, atomic_write_json=boom, log=log)
+            self.assertTrue(any("落盘失败" in m for m in logs))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

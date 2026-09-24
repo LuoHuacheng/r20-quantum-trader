@@ -163,5 +163,81 @@ class BreakerSidecarTests(unittest.TestCase):
             self.assertFalse(active, f"未配置凭证的免密行情所导致了误熔断: {reason}")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class SidecarUnknownIsFailClosedTest(unittest.TestCase):
+    """旁车"不可判定" ⇒ **禁开仓**（第一百四十四刀，用户拍板 fail-closed）。
+
+    背景：旧 docstring 声称"过旧由 ledger 的 file_health STALE 通道兜底"，但两个调用方
+    都没有该检查 ⇒ 旁车损坏/过旧会被读成"各所同步正常"，当日亏损求和可能不完整却**不熔断**。
+
+    用户拍板方向：**不可判定 ≠ 安全** ⇒ 旁车损坏/过旧一律安全暂停开仓
+    （仓位管理与既有保护单不受影响；旁车恢复后自动解除）。
+
+    兼容契约保留：`_ledger_sync_failed_venues()`（壳）与既有"缺失/过旧 ⇒ 不列出"的用例不变；
+    方向体现在**调用方**而不是这个壳上。
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path as _P
+        self.tmp = tempfile.TemporaryDirectory(prefix="sidecar-unknown-")
+        self.addCleanup(self.tmp.cleanup)
+        root = _P(self.tmp.name)
+        (root / "trading_ledger.json").write_text("[]", encoding="utf-8")
+        patches = [
+            patch.object(cb, "DATA_DIR", root),
+            patch.object(cb, "LEDGER_JSON_FILE", root / "trading_ledger.json"),
+            patch.object(cb, "CIRCUIT_BREAKER_FILE", root / "circuit_breaker.json"),
+            patch.object(cb, "check_black_swan_sentinel", lambda **kw: (False, "")),
+        ]
+        for pt in patches:
+            pt.start()
+            self.addCleanup(pt.stop)
+        self.root = root
+
+    def _write_sidecar(self, venues, minutes_ago=0.0):
+        gen = (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+               - datetime.timedelta(minutes=minutes_ago))
+        (self.root / "ledger_sync_status.json").write_text(
+            json.dumps({"generated_at": gen.isoformat(), "environment": "demo",
+                        "venues": venues}), encoding="utf-8")
+
+    def test_missing_sidecar_is_known_empty_not_unknown(self):
+        """全新环境尚未同步过 ⇒ 不算不可判定（否则会把开仓全停）。"""
+        failed, unknown = cb._ledger_sync_sidecar_state()
+        self.assertEqual((failed, unknown), ([], ""))
+        active, reason = cb.is_circuit_breaker_active(usdt_available=1000.0)
+        self.assertFalse(active, reason)
+
+    def test_stale_sidecar_blocks_new_entries(self):
+        self._write_sidecar({"binance": {"status": "failed"}}, minutes_ago=60)
+        failed, unknown = cb._ledger_sync_sidecar_state()
+        self.assertEqual(failed, [], "兼容：壳仍不列出（过旧场景）")
+        self.assertIn("过旧", unknown)
+        active, reason = cb.is_circuit_breaker_active(usdt_available=1000.0)
+        self.assertTrue(active, "不可判定 ⇒ fail-closed（用户拍板）")
+        self.assertIn("不可判定", reason)
+        self.assertIn("暂停开仓", reason)
+
+    def test_corrupt_sidecar_blocks_new_entries(self):
+        (self.root / "ledger_sync_status.json").write_text("{ 半截", encoding="utf-8")
+        failed, unknown = cb._ledger_sync_sidecar_state()
+        self.assertEqual(failed, [])
+        self.assertIn("损坏", unknown)
+        active, reason = cb.is_circuit_breaker_active(usdt_available=1000.0)
+        self.assertTrue(active)
+        self.assertIn("不可判定", reason)
+
+    def test_fresh_healthy_sidecar_still_does_not_trip(self):
+        """回归护栏：健康旁车不得被新逻辑误伤。"""
+        self._write_sidecar({"okx": {"status": "ok"}, "binance": {"status": "ok"}})
+        active, reason = cb.is_circuit_breaker_active(usdt_available=1000.0)
+        self.assertFalse(active, reason)
+
+    def test_twin_caller_shares_the_same_direction(self):
+        """trader 孪生版必须同源（防孪生漂移：一处禁、一处不禁）。"""
+        twin = (Path(__file__).resolve().parents[2] / "scripts" / "trader"
+                / "circuit_guard.py").read_text(encoding="utf-8")
+        self.assertIn("_ledger_sync_sidecar_state", twin)
+        self.assertIn("不可判定", twin)
+        self.assertIn('return True, (f"台账同步状态不可判定', twin,
+                      "孪生版必须同样 fail-closed（返回 True），而不是只打印")

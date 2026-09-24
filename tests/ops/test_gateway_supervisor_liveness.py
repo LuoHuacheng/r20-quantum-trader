@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 from r20_gateway import supervisor
 from r20_gateway.pidfile import PID_FILE
+from tests.config_sandbox import skip_if_offline_suite
 
 
 class TestLivenessWithoutProc(unittest.TestCase):
@@ -33,9 +34,11 @@ class TestLivenessWithoutProc(unittest.TestCase):
         with patch.object(supervisor, "_PROC_AVAILABLE", False):
             self.assertTrue(supervisor._is_gateway_worker(os.getpid()))
 
-    @unittest.skipIf(os.environ.get("OFFLINE_SUITE_RUNNING"),
-                     "以 spawn 为被测对象：离线套件按约定在 spawn 前自跳")
     def test_dead_pid_still_reported_dead_without_proc(self):
+        # 本用例以 spawn 为被测对象：按仓内约定走共享 helper（条件在 helper 内部），
+        # 而不是把 `os.environ.get` 写在装饰器实参里 —— 后者会让「跳过普查」门
+        # 把它当成无条件的死用例。
+        skip_if_offline_suite(self, '以 spawn 为被测对象：离线套件按约定在 spawn 前自跳')
         with patch.object(supervisor, "_PROC_AVAILABLE", False):
             self.assertFalse(supervisor._is_gateway_worker(self._dead_pid()))
 

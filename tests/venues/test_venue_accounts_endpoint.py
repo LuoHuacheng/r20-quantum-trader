@@ -19,11 +19,26 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 # 封闭三律：r20_backend.dashboard_cache 在模块导入时即启动 2s 周期后台刷新线程（update_cache_cycle
-# → okx_rest 真调 OKX 私有面；r20_backend startup 还会二次点火）。测试进程一次性，
-# 进程内永久钉死循环体为 no-op——不恢复，杜绝任何点火路径的真实出网。
+# → okx_rest 真调 OKX 私有面；r20_backend startup 还会二次点火）。本模块的用例会
+# `TestClient(app)` 触发 lifespan 再点火一次 ⇒ 本模块期间把循环体钉成 no-op。
+#
+# ⚠️ 第一百二十五刀：**改成模块作用域**（`setUpModule`/`tearDownModule`）。
+# 此前是在**模块导入期永久替换**（进程内不恢复），后果是整个测试进程里
+# `r20_backend.dashboard_cache.update_cache_cycle` 都成了 no-op —— 任何**真调它**的
+# 用例只会拿到空 `CACHE_DATA`（第 29 刀实测：`tests/ui/test_protection_gap_reaches_data_health.py`
+# 整包跑 `KeyError('data_health')`，单独跑却通过）。本模块结束后即还原。
 import r20_backend.dashboard_cache as _dashboard_app
-_dashboard_app.stop_dashboard_background_worker()
-_dashboard_app.update_cache_cycle = lambda *a, **k: None
+_ORIGINAL_UPDATE_CACHE_CYCLE = _dashboard_app.update_cache_cycle
+
+
+def setUpModule():
+    _dashboard_app.stop_dashboard_background_worker()
+    _dashboard_app.update_cache_cycle = lambda *a, **k: None
+
+
+def tearDownModule():
+    _dashboard_app.update_cache_cycle = _ORIGINAL_UPDATE_CACHE_CYCLE
+    _dashboard_app.stop_dashboard_background_worker()
 
 import r20_backend.app as app_module
 from r20_backend.admin_auth import AdminAuthStore
@@ -32,7 +47,7 @@ import scripts.okx_runtime as okx_runtime
 import r20_backend.exchanges as exchanges_pkg
 
 CONTRACT_KEYS = {"status", "equity", "available", "positions_count",
-                 "open_orders_count", "last_sync_ts", "reason"}
+                 "open_orders_count", "last_sync_ms", "reason"}
 
 
 class _StubGateAdapter:
@@ -161,7 +176,7 @@ class VenueAccountsEndpointTests(unittest.TestCase):
         self.net_sentry.assert_not_called()
         for key in ("okx", "gate", "binance"):
             self.assertEqual(v[key]["status"], "unavailable", key)
-            for f in ("equity", "available", "positions_count", "open_orders_count", "last_sync_ts"):
+            for f in ("equity", "available", "positions_count", "open_orders_count", "last_sync_ms"):
                 self.assertIsNone(v[key][f], f"{key}.{f} 未知必须为 None 不填 0")
             self.assertTrue(len(v[key]["reason"]) > 4, f"{key} 缺人话 reason")
 

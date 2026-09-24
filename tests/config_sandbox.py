@@ -90,6 +90,12 @@ def isolate_config(test):
                  # 逐个确认过：15 个都能在**零副作用**下 import
                  # （无网络、无起进程、无端口绑定），与既有白名单同性质。
                  # 对应回归测试：`tests/audit/test_production_data_isolation.py`。
+                 # ---- 第一百一十四刀补：风控预留库（`data/risk_reservation.db`）。
+                 # 实测两处测试**只夹带渲染仪表盘**就经 `dashboard_payload.market`
+                 # 的 `get_manager()` 连到生产预留库（`RiskReservationManager.__init__`
+                 # 会建表）——而本模块此前既不在白名单、常量又是惰性 import 后才求值，
+                 # 于是永远没人重定向它。白名单 import 保证"先 import 后重定向"的顺序。
+                 'r20_backend.risk_reservation',
                  'r20_backend.account_baseline',
                  'r20_backend.admin_auth',
                  'r20_backend.backup_secrets',
@@ -124,7 +130,22 @@ def isolate_config(test):
             try:
                 relative = Path(value).relative_to(project / 'data')
             except ValueError:
-                continue
+                # ⚠️ 第二百三十五刀：会话级配置沙箱（`tests/__init__.py`）会把
+                # `prompt_library.LIBRARY_FILE` 之类的常量挪到 /tmp 下 —— 那些值不在
+                # `project/data` 前缀里，按原规则会被**跳过**，于是本沙箱反而"管不到"它们
+                # （实测 `test_config_sandbox.py::test_nested_policy_paths_share_one_sandbox`
+                # 就是这么红的）。这里把会话沙箱下的常量**接管**进来：更具体的沙箱优先。
+                from tests import session_sandbox_roots
+
+                relative = None
+                for sroot in session_sandbox_roots():
+                    try:
+                        relative = Path(value).relative_to(sroot)
+                    except ValueError:
+                        continue
+                    break
+                if relative is None:
+                    continue
             target = root / 'data' / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             replacement = str(target) if isinstance(value, str) else target
@@ -143,4 +164,13 @@ def isolate_config(test):
             "0 0" if args[0] == "rev-list" else "test" if args[0] == "branch" else
             "" if args[0] in ("fetch", "status") else "abc1234"))
         git_probe.start(); test.addCleanup(git_probe.stop)
+    # ⚠️ 只重定向常量还不够：`risk_reservation.get_manager()` 缓存了进程级实例，
+    # 一旦某次未沙箱调用先建了实例，它会**永久指向生产库**（实测污染源）。
+    # 清缓存才能让新常量真正生效。
+    try:
+        import r20_backend.risk_reservation as _rr
+        _rr.reset_default_manager()
+    except Exception:
+        pass
+
     return root

@@ -51,7 +51,9 @@ def _venue_account_unknown(status: str, reason: str) -> dict[str, Any]:
     out: dict[str, Any] = {"status": status, "reason": reason}
     for f in _VENUE_ACCOUNT_FIELDS:
         out[f] = None
-    out["last_sync_ts"] = None
+    # 第一百六十九刀：`last_sync_ts` → **`last_sync_ms`**（值一直是毫秒，名字在说谎）。
+    # 本字段只出现在本接口的响应里（不落盘），仓库内无旧名读者；前端 store 已同步改名。
+    out["last_sync_ms"] = None
     return out
 
 
@@ -100,7 +102,7 @@ def _venue_accounts_okx(environment: str) -> dict[str, Any]:
         out["available"] = avail_val
         out["positions_count"] = sum(1 for p in (pos or []) if abs(float(p.get("pos") or 0)) > 1e-12)
         out["open_orders_count"] = len(pend or [])
-        out["last_sync_ts"] = int(time.time() * 1000)
+        out["last_sync_ms"] = int(time.time() * 1000)
     except Exception as exc:
         return _venue_account_unknown("degraded", f"OKX 返回解析失败: {type(exc).__name__}: {exc}")
     return out
@@ -133,7 +135,7 @@ def _venue_accounts_gate(environment: str) -> dict[str, Any]:
             "available": float(acct.get("available_usdt") or 0),
             "positions_count": len(positions),
             "open_orders_count": len(open_rows if isinstance(open_rows, list) else []),
-            "last_sync_ts": int(time.time() * 1000),
+            "last_sync_ms": int(time.time() * 1000),
             "reason": f"Gate {gate_env} 档适配器直读",
         }
     except Exception as exc:
@@ -174,7 +176,7 @@ def _venue_accounts_binance(environment: str = "demo") -> dict[str, Any]:
             "available": float(acct.get("available_usdt") or 0.0),
             "positions_count": len(positions),
             "open_orders_count": len(open_rows if isinstance(open_rows, list) else []),
-            "last_sync_ts": int(time.time() * 1000),
+            "last_sync_ms": int(time.time() * 1000),
             "reason": f"Binance {bn_env} 档适配器直读",
         }
     except Exception as exc:
@@ -416,6 +418,10 @@ def admin_okx_account_snapshot(
         for p in (okx_snap.get("positions") or []):
             p_copy = dict(p)
             p_copy.setdefault("venue", "okx")
+            imr = float(p.get("imr", 0) or p.get("margin", 0) or 0)
+            if imr <= 0 and float(p.get("notionalUsd", 0) or 0) > 0 and float(p.get("lever", 0) or 0) > 0:
+                imr = round(float(p.get("notionalUsd")) / float(p.get("lever")), 2)
+            p_copy["margin"] = imr
             combined_positions.append(p_copy)
         for o in (okx_snap.get("orders") or []):
             o_copy = dict(o)
@@ -450,12 +456,22 @@ def admin_okx_account_snapshot(
                         venue=venue, environment=env.mode, display_inst=inst_display,
                         symbol=sym, pos_side=pos_side, expected_size=abs(amt),
                         credential_fingerprint=cred_fp)
+                    # 保证金口径与 OKX 段对齐：优先交易所给的 margin，缺失时用
+                    # 名义额/杠杆推（两者都来自交易所实况）；都拿不到就是 0，
+                    # 前端据此回落显示原生张数，不显示捏造的数字。
+                    _pos_margin = float(p.get("margin") or 0.0)
+                    if _pos_margin <= 0:
+                        _pos_lev = float(p.get("leverage") or 0.0)
+                        _pos_notional = float(p.get("notional") or 0.0)
+                        if _pos_lev > 0 and _pos_notional > 0:
+                            _pos_margin = round(_pos_notional / _pos_lev, 2)
                     combined_positions.append({
                         "venue": venue,
                         "exchange": venue,
                         "instId": inst_display,
                         "posSide": pos_side,
                         "pos": str(abs(amt)),
+                        "margin": _pos_margin,
                         "mgnMode": "cross",
                         "upl": float(p.get("unrealized_pnl", 0) or 0),
                         "close_confirmation": close_confirmation,
@@ -532,3 +548,58 @@ def listing_status(environment: str = Query(default="demo"),
         "venues": venues,
         "captured_at_ms": int(time.time() * 1000),
     }
+
+
+@router.get("/api/v1/admin/venue-protection/scan")
+def venue_protection_scan(
+    x_r20_admin_token: str | None = Header(default=None),
+    x_r20_session: str | None = Header(default=None, alias="X-R20-Session"),
+) -> dict[str, Any]:
+    """跨所保护单**只读预演**（roadmap G8）：开闸前先看"这一轮会做什么"。
+
+    - **绝不下单、绝不撤单**：走 `audit_cross_venue_protection(dry_run=True)`，
+      只读交易所的保护单列表并判定（缺口/临期/不可判定）；
+    - 需要 live 网络（每所一次持仓读取 + 每仓一次保护单列表），故需管理员鉴权；
+    - 输出 `would`（本该做什么：renew/repair/verify/noop）、`critical`（完全没有止损腿）、
+      `errors`（逐所隔离的失败）。`R20_VENUE_PROTECTION_WATCHDOG` 的开关状态一并回传，
+      便于区分"巡检没开"与"巡检开了但没发现问题"。
+    """
+    require_admin_header(x_r20_admin_token, x_r20_session)
+    from scripts.okx_runtime import current_environment
+    from r20_backend.close_intent import adapter_environment
+    from r20_backend.exchanges import get_adapter
+    from scripts.trader.venue_protection import audit_cross_venue_protection
+
+    env = current_environment()
+    snapshot: dict[str, Any] = {}
+    snapshot_errors: dict[str, str] = {}
+    for venue in ("gate", "binance"):
+        try:
+            ad = get_adapter(venue, environment=adapter_environment(venue, env.mode))
+            rows = [p for p in (ad.positions() or [])
+                    if abs(float(p.get("size_signed") or 0) or 0) > 0]
+            snapshot[venue] = rows
+        except Exception as exc:
+            # 与巡检同一纪律：读不到就如实登记，绝不假装"该所干净"
+            snapshot_errors[venue] = f"{type(exc).__name__}: {exc}"
+            snapshot[venue] = []
+
+    class _Registry:
+        @staticmethod
+        def get_adapter(v: str, environment: str | None = None):
+            return get_adapter(v, environment=environment or adapter_environment(v, env.mode))
+
+    # 第一百七十四刀：把台账行交给归属层做**取证**（`ledger` 档证据＝同币同向同量已平记录）。
+    # 读不到 ⇒ None ⇒ 不产生证据（腿留在"归属不可判定"，绝不自动撤）。
+    from scripts.trader.venue_protection import read_ledger_rows
+    report = audit_cross_venue_protection(snapshot, venue_registry=_Registry,
+                                          environment=env.mode, dry_run=True,
+                                          ledger_rows=read_ledger_rows(DATA_DIR / "trading_ledger.json"))
+    report["environment"] = env.mode
+    report["snapshot_errors"] = snapshot_errors
+    try:
+        from scripts import ai_factor_trader as _aft
+        report["watchdog_enabled"] = bool(getattr(_aft, "R20_VENUE_PROTECTION_WATCHDOG", False))
+    except Exception:
+        report["watchdog_enabled"] = None
+    return report

@@ -373,8 +373,12 @@ def cmd_start(sub: str, dry: bool, lines: int) -> int:
                     f"[r20ctl] 端口 {port()} 被**非本工具托管**的进程占用（无 manual pidfile，"
                     f"launchd agent 也未加载）—— 换代码前必须先收掉它，否则本命令只会空转。\n"
                     f"          排查：lsof -nP -iTCP:{port()} -sTCP:LISTEN")
-        rc = _start_service_manager(sub, False, lines)
+        rc = _start_service_manager(sub, False, lines, announce=False)
         if rc == 0 and _wait_port_open(launch_verify_seconds()):
+            # ★ 只有**端口真的起来了**才敢说成功：`_start_service_manager` 里的
+            # `kickstart` 返回 0 只代表命令被接受了（本机 TCC 下 agent 照样秒死）——
+            # 在那里就报“✅ 已重启”正是 2026-09-24 那次假成功的另一半。
+            print(f"✅ R20 已{'重启' if restart else '启动'}（launchd {label()}，日志 {log_file()}）")
             return 0
         print(f"⚠️  launchd 未能在 {launch_verify_seconds():g}s 内监听端口 {port()}")
         print(f"    摘掉崩溃循环的 agent（{service_target()}），回落 manual supervisor")
@@ -384,8 +388,13 @@ def cmd_start(sub: str, dry: bool, lines: int) -> int:
     return _start_service_manager(sub, dry, lines)
 
 
-def _start_service_manager(sub: str, dry: bool, lines: int) -> int:
-    """start / restart 的服务管理器路径（launchd / systemd）。未安装必须明确拒动并指路。"""
+def _start_service_manager(sub: str, dry: bool, lines: int, announce: bool = True) -> int:
+    """start / restart 的服务管理器路径（launchd / systemd）。未安装必须明确拒动并指路。
+
+    `announce=False` 供 **auto** 路径用：那里的"成功"要等**端口真的起来**才算，
+    不能拿 `kickstart` 的返回码顶替（本机 TCC 下 agent 会在 exec 前就死，但命令
+    返回 0 —— 在那里就打印"✅ 已重启（launchd）"正是那次假成功的成因之一）。
+    """
     if platform() == "darwin":
         if not plist_path().exists():
             return _fail(
@@ -402,7 +411,7 @@ def _start_service_manager(sub: str, dry: bool, lines: int) -> int:
             if rc != 0:
                 return _fail(f"[r20ctl] bootstrap 失败（rc={rc}）；检查 plist 与日志")
         rc = _run(_launchctl("kickstart", "-k", service_target()))
-        if rc == 0:
+        if rc == 0 and announce:
             print(f"✅ R20 已{'重启' if sub == 'restart' else '启动'}（launchd {label()}，日志 {log_file()}）")
         return rc
 

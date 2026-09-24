@@ -437,6 +437,11 @@ class AutoRestartMustReplaceTheManualBackendTest(_ManualHarness):
         self.assertNotEqual(old, new, "restart 必须换进程（旧实现在这里被旧端口骗过而空转）")
         self.assertTrue(self._wait_dead(old), "旧后端必须先被收掉，不许与新的并存")
         self.assertTrue(_alive(new), "新后端必须活着")
+        # ★ 真话才算修好：`kickstart` 返回 0 但端口没起来时，**不许**出现
+        # “✅ R20 已重启（launchd …）”那句 —— 那次事故的另一半就是它。
+        self.assertNotIn("已重启（launchd", r.stdout,
+                         "端口没起来就不能声称 launchd 重启成功")
+        self.assertIn("manual", r.stdout.lower(), "落回 manual 要如实说出来")
 
     def test_port_held_by_an_unmanaged_orphan_refuses_instead_of_lying(self):
         """端口有人听、pidfile 却空 ⇒ 本工具够不着 ⇒ 必须拒动并指路，绝不谎报成功。"""

@@ -136,7 +136,10 @@ def diagnose_channel(channel: str, env: dict[str, str] | None = None) -> dict[st
 
 
 def send_channel(channel: str, message: str, env: dict[str, str] | None = None) -> tuple[bool, str]:
-    env = env or _env()
+    # ⚠️ 判 `is None` 而不是 falsy：`env={}` 是调用方**显式声明「本次没有任何配置」**，
+    # 旧写法 `env or _env()` 会把它当成「没传」，静默回落到 `.env`/进程环境 ——
+    # 于是「未配置 ⇒ 不发请求」的用例在配了 webhook 的宿主上会真发一条出去。
+    env = _env() if env is None else env
     if channel == "webhook":
         url = env.get("R20_NOTIFICATION_WEBHOOK", "").strip()
         if not url:

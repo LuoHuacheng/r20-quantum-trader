@@ -296,15 +296,20 @@ def import_backup_job_api(payload: BackupJobImportRequest, x_r20_session: str | 
 @router.post("/api/v1/admin/backup-jobs/verify")
 def verify_backup_archive_api(payload: BackupVerifyRequest, x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
     actor = require_superadmin(x_r20_session)
-    candidate = (_get_root() / payload.archive_path).resolve()
-    if not candidate.is_relative_to((_get_root() / "backups").resolve()):
+    # ⚠️ 锚点先 resolve：`candidate` 是 resolve 过的，拿**未 resolve** 的 `_get_root()`
+    # 去做 `relative_to`，只要仓库落在符号链接路径下（macOS `/var` → `/private/var`）
+    # 就会抛 `ValueError: ... is not in the subpath of ...` —— 验证成功后写审计这一
+    # 步直接 500，而归档实际上已经验完。两侧用同一个已 resolve 的锚点。
+    root = _get_root().resolve()
+    candidate = (root / payload.archive_path).resolve()
+    if not candidate.is_relative_to((root / "backups").resolve()):
         raise HTTPException(status_code=400, detail="只能验证项目 backups/ 目录内的归档")
     from scripts.backup_runtime import verify_archive
     try:
         result = verify_archive(candidate, payload.expected_sha256, payload.key_env)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    audit_record("backup.archive.verify", "success", {"actor": actor["username"], "archive": str(candidate.relative_to(_get_root())), "members": result["members"]})
+    audit_record("backup.archive.verify", "success", {"actor": actor["username"], "archive": str(candidate.relative_to(root)), "members": result["members"]})
     return result
 
 

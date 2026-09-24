@@ -326,20 +326,53 @@ def manual_stop(dry: bool) -> int:
     return 0
 
 
+def _agent_loaded() -> bool:
+    """launchd agent 是否**已加载**（`launchctl print` 成功即可，不判它跑没跑起来）。
+
+    「已加载但瞬间死掉」也要算已加载：那种 agent 是由 launchd 管的，`kickstart -k`
+    会把它换掉；本函数只用来区分「端口被 launchd 管的进程占着」与「端口被够不着的
+    孤儿占着」——后者换代码是不可能的，必须拒动而不是谎报成功。
+    """
+    return subprocess.run(_launchctl("print", service_target()),
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
 def cmd_start(sub: str, dry: bool, lines: int) -> int:
     """start / restart 的**后端派发**：manual 直走；auto（macOS）先试 launchd，
-    验不通就摘掉崩溃循环的 agent 并回落 manual（而不是留一个哑炮命令）。"""
+    验不通就摘掉崩溃循环的 agent 并回落 manual（而不是留一个哑炮命令）。
+
+    ★ `restart` 的第一步必须是**收掉现存后端**（2026-09-24 实测事故）：manual
+    supervisor 不是 launchd 管的，`kickstart -k` 碰不到它；而它一直占着端口 ⇒
+    下面的 `_wait_port_open` 立刻为真 ⇒ 命令报「✅ 已重启」而实际上什么都没换
+    （旧进程原封不动，还留下一个 EX_CONFIG(78) 的 agent 在 KeepAlive 空转）。
+    """
     mode = backend_mode()
     if mode == "manual":
         return manual_start(dry, restart=(sub == "restart"))
     if mode == "auto" and platform() == "darwin":
+        restart = sub == "restart"
         if dry:
             print(f"[backend] auto：先试 launchd；{launch_verify_seconds():g}s 内未监听则回落 manual")
+            if restart:
+                print(f"[restart] 先收掉现存后端（manual supervisor 不在 launchd 名下，"
+                      f"不收它则端口被旧进程占住 → 探活必假阳）：kill -TERM <{pidfile()} 里的 pid>")
             print(f"[pidfile] {pidfile()}")
             for c in plan(sub, lines):
                 _echo(c)
             print(f"[fallback] manual：spawn {shlex.join(start_argv())}")
             return 0
+        if restart:
+            existing = _read_manual_pid()
+            if _alive(existing):
+                print(f"[restart] 先收掉现存的 manual supervisor（pid {existing}）")
+                manual_stop(dry=False)
+            elif _port_open() and not _agent_loaded():
+                # 端口有人听、但既不在 pidfile 里也不在 launchd 名下 = 本工具够不着的孤儿。
+                # 此时不可能换代码，如实拒动并指路 —— 绝不谎报成功。
+                return _fail(
+                    f"[r20ctl] 端口 {port()} 被**非本工具托管**的进程占用（无 manual pidfile，"
+                    f"launchd agent 也未加载）—— 换代码前必须先收掉它，否则本命令只会空转。\n"
+                    f"          排查：lsof -nP -iTCP:{port()} -sTCP:LISTEN")
         rc = _start_service_manager(sub, False, lines)
         if rc == 0 and _wait_port_open(launch_verify_seconds()):
             return 0
@@ -364,10 +397,7 @@ def _start_service_manager(sub: str, dry: bool, lines: int) -> int:
                 _echo(c)
             return 0
         # 已加载时 kickstart -k 即为重启；未加载则先 bootstrap
-        loaded = subprocess.run(
-            _launchctl("print", service_target()),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-        if not loaded:
+        if not _agent_loaded():
             rc = _run(_launchctl("bootstrap", f"gui/{uid()}", str(plist_path())))
             if rc != 0:
                 return _fail(f"[r20ctl] bootstrap 失败（rc={rc}）；检查 plist 与日志")

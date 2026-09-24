@@ -24,6 +24,15 @@
 
 自检：**非空**（必须真扫到 ≥6 个 atomic 辅助函数）+ **有牙齿**（把 mkstemp+replace 换成
 `open(path,"w")` 必须翻红；直写敏感文件也必须翻红）。
+
+## 后续补门（2026-09-24）：还要**失败必清**
+
+本刀原先只钉「原子性」，没钉「失败路径」—— 于是两个漏网的辅助函数
+（`r20_backend/council_manager.py`、`r20_backend/policy/io.py`）在写失败时把临时件
+永久留在了数据目录里：现场一小时内堆下 51 个 `data/tmp*`（完整 JSON、共 513 KB，
+名字无前缀连忽略规则都盖不住），而 `data/council_config.json` 两天没更新。
+现补第三项判据：辅助函数体内必须有带 `unlink` 的 `try`（`finally` 或 `except…raise` 两种
+等价写法都接受），并把它作为**负例**钉进牙齿自检。
 """
 
 from __future__ import annotations
@@ -66,6 +75,16 @@ def _atomic_helper_violations(name: str, src: str) -> "list[str]":
             problems.append(f"{name}:{fn.lineno}: {fn.name} 缺 fsync（rename 后断电可能留下空/截断文件）")
         if "os.replace" not in body and "os.rename" not in body:
             problems.append(f"{name}:{fn.lineno}: {fn.name} 缺 os.replace/os.rename（非原子替换）")
+        # 失败清理：临时件必须在**异常路径**上也被收掉。没有它，一次写失败就在数据
+        # 目录里留下一个永久孤儿（实测：council_manager 与 policy/io 两处漏了这个，
+        # 现场一小时内堆下 51 个完整 JSON 的孤儿共 513 KB，而目标文件两天没更新 ——
+        # 写没落盘、垃圾留下了，两个错都很静默）。两种等价写法都接受：
+        # `finally: unlink` / `except ...: unlink; raise`。
+        if not any(isinstance(node, ast.Try) and "unlink" in ast.unparse(node)
+                   for node in ast.walk(fn)):
+            problems.append(
+                f"{name}:{fn.lineno}: {fn.name} 缺失败清理（异常路径必须 unlink 临时件，"
+                "否则写失败会在数据目录里留下永久孤儿）")
         # 目标路径直写：`open(<expr>, "w")` 且该表达式不是临时文件变量
         for call in ast.walk(fn):
             if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
@@ -159,14 +178,20 @@ class AtomicWriteInvariantTest(unittest.TestCase):
             "import json, os, tempfile\n"
             "def _atomic_write_json(path, payload):\n"
             "    fd, tmp = tempfile.mkstemp(dir='.')\n"
-            "    with os.fdopen(fd, 'w') as f:\n"
-            "        json.dump(payload, f)\n"
-            "        f.flush(); os.fsync(f.fileno())\n"
-            "    os.replace(tmp, path)\n"
+            "    try:\n"
+            "        with os.fdopen(fd, 'w') as f:\n"
+            "            json.dump(payload, f)\n"
+            "            f.flush(); os.fsync(f.fileno())\n"
+            "        os.replace(tmp, path)\n"
+            "    finally:\n"
+            "        if os.path.exists(tmp):\n"
+            "            os.unlink(tmp)\n"
         )
         self.assertEqual(_atomic_helper_violations("y.py", good_helper), [])
         # `NamedTemporaryFile(delete=False)` 是等价机制（我第一版只认 mkstemp ⇒ 假阳性）
-        named_tmp = (
+        # ⚠️ 但它 **必须带失败清理**：下面这份就是没有清理的真实缺陷形状
+        # （2026-09-24 的 `data/tmp*` 孤儿事故），故作为**负例**钉住。
+        leaking_named_tmp = (
             "import json, os, tempfile\n"
             "def _atomic_write_json(path, payload):\n"
             "    with tempfile.NamedTemporaryFile('w', dir='.', delete=False) as tf:\n"
@@ -174,6 +199,22 @@ class AtomicWriteInvariantTest(unittest.TestCase):
             "        tf.flush(); os.fsync(tf.fileno())\n"
             "        name = tf.name\n"
             "    os.replace(name, path)\n"
+        )
+        self.assertTrue(
+            _atomic_helper_violations("nt_leak.py", leaking_named_tmp),
+            "临时件没有失败清理必须被抓 —— 这就是 51 个 data/tmp* 孤儿的形状")
+        named_tmp = (
+            "import json, os, tempfile\n"
+            "def _atomic_write_json(path, payload):\n"
+            "    fd, tmp = tempfile.mkstemp(dir='.')\n"
+            "    try:\n"
+            "        with os.fdopen(fd, 'w') as f:\n"
+            "            json.dump(payload, f)\n"
+            "            f.flush(); os.fsync(f.fileno())\n"
+            "        os.replace(tmp, path)\n"
+            "    finally:\n"
+            "        if os.path.exists(tmp):\n"
+            "            os.unlink(tmp)\n"
         )
         self.assertEqual(_atomic_helper_violations("nt.py", named_tmp), [])
         direct = (

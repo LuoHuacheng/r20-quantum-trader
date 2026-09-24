@@ -28,13 +28,24 @@ _process_thread_lock = threading.RLock()
 
 def _atomic_write_json(file_path: Path, data: Any) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=file_path.parent, delete=False, encoding="utf-8") as tf:
-        json.dump(data, tf, ensure_ascii=False, indent=2)
-        # 第一百五十四刀：与其余原子写辅助统一（rename 前 fsync）
-        tf.flush()
-        os.fsync(tf.fileno())
-        temp_name = tf.name
-    os.replace(temp_name, file_path)
+    # ⚠️ 临时件必须**可识别**且**失败必清**（同 council_manager 的历史漏网）：
+    # `NamedTemporaryFile(dir=parent, delete=False)` 既生成无前缀的 `tmpXXXXXXXX`
+    # （任何忽略规则都盖不住），又**没有任何清理** —— 写失败时目标未更新、垃圾却
+    # 永久留在 `data/` 下（写策略归档时是 `data/policy_archives/`）。
+    fd, temp_name = tempfile.mkstemp(prefix=f".{file_path.name}-", dir=file_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tf:
+            json.dump(data, tf, ensure_ascii=False, indent=2)
+            # 第一百五十四刀：与其余原子写辅助统一（rename 前 fsync）
+            tf.flush()
+            os.fsync(tf.fileno())
+        os.replace(temp_name, file_path)
+    finally:
+        if os.path.exists(temp_name):
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
 
 
 @contextmanager

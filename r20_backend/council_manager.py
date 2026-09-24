@@ -101,15 +101,27 @@ def _locked_council(fn):
 
 def _atomic_write_json(file_path: Path, data: Any) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_dir = file_path.parent
-    with tempfile.NamedTemporaryFile("w", dir=temp_dir, delete=False, encoding="utf-8") as tf:
-        json.dump(data, tf, ensure_ascii=False, indent=2)
-        # 第一百五十四刀：与另外 5 个原子写辅助统一 —— rename 前 fsync，
-        # 否则断电可能留下空/截断文件（rename 的原子性管不了数据是否已落盘）
-        tf.flush()
-        os.fsync(tf.fileno())
-        temp_name = tf.name
-    os.replace(temp_name, file_path)
+    # ⚠️ 临时件必须**可识别**且**失败必清**（本仓其余原子写辅助都这么做，此处是漏网）：
+    # 旧写法 `NamedTemporaryFile(dir=parent, delete=False)` 既无前缀（生成
+    # `tmpXXXXXXXX`，`data/*.tmp` 那条忽略规则匹配不到），也**没有任何清理**。
+    # 实测现场一小时内落下 51 个完整 JSON 的孤儿（共 513 KB），而
+    # `data/council_config.json` 还停在两天前 —— 写没落盘、垃圾却留下了，两种
+    # 静默都不能接受：现在失败会把临时件收掉并把异常原样上抛（不再是无声垃圾）。
+    fd, temp_name = tempfile.mkstemp(prefix=f".{file_path.name}-", dir=file_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tf:
+            json.dump(data, tf, ensure_ascii=False, indent=2)
+            # 第一百五十四刀：与另外 5 个原子写辅助统一 —— rename 前 fsync，
+            # 否则断电可能留下空/截断文件（rename 的原子性管不了数据是否已落盘）
+            tf.flush()
+            os.fsync(tf.fileno())
+        os.replace(temp_name, file_path)
+    finally:
+        if os.path.exists(temp_name):
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
 
 
 

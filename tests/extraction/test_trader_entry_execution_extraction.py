@@ -62,15 +62,130 @@ def _facade_call() -> ast.Call:
     raise AssertionError("门面里没有 execute_entry_scan 调用点")
 
 
+#: ⚠️ **文档化差异**（第一百三十八刀新增本表）：本门默认要求入场循环与抽取前
+#: **同一棵 AST（零归一）**。用户拍板的 fail-closed 修复必须进这个循环，故开一个
+#: 最小口子：登记"新文本 → 旧文本"，于是"新循环还原差异 == 基线循环"，
+#: **表外任何改动照旧翻红**（含本表锚点唯一性自检）。
+#:
+#: 本刀唯一一条：追踪器缺失时**视同已达加仓上限**（`scale_count` 缺省 0 会让
+#: 「每仓最多加仓 N 次」静默失效 ⇒ 可反复加仓、过度集中）。读失败时
+#: `load_trackers()` 返回标记型空字典 ⇒ 必然命中该分支。
+DELTA_REWRITES = (
+    ("""                if not tracker:
+                    print(f"[Pyramiding] {f['name']} 追踪器缺失 ⇒ 无法核验已加仓次数，"
+                          "按 fail-closed 视同已达上限（宁可不加，不可无限加）")
+                scale_count = (int(tracker.get("scale_count", 0)) if tracker
+                               else MAX_SCALE_IN_COUNT)
+""",
+     """                scale_count = int(tracker.get("scale_count", 0))
+"""),
+)
+
+
 class EntryExecutionVerbatimTest(unittest.TestCase):
     def test_extracted_loop_is_ast_identical_to_baseline(self):
         old, new = _base_loop(), _impl_fn()
         # 提取后的函数体第一个语句就是那个 for
         loop = new.body[0]
         self.assertIsInstance(loop, ast.For)
-        self.assertEqual(ast.dump(loop, include_attributes=False),
+        # 文档化差异：在**源码**上还原（AST 比较不看注释；锚点必须唯一）
+        mod_src = (ROOT / MOD).read_text(encoding="utf-8")
+        for _new_tok, _old_tok in DELTA_REWRITES:
+            self.assertEqual(mod_src.count(_new_tok), 2,
+                             f"锚点应恰好出现两次（多空各一）：{_new_tok[:50]!r}")
+            mod_src = mod_src.replace(_new_tok, _old_tok)
+        restored = next(n for n in ast.parse(mod_src).body
+                        if isinstance(n, ast.FunctionDef) and n.name == FN)
+        self.assertEqual(ast.dump(restored.body[0], include_attributes=False),
                          ast.dump(old, include_attributes=False),
-                         "入场循环与抽取前**不再是同一棵 AST**")
+                         "入场循环与抽取前**不再是同一棵 AST**（超出文档化差异）")
+
+    def test_missing_tracker_is_treated_as_cap_reached(self):
+        """追踪器缺失 ⇒ **视同已达加仓上限**（用户拍板 fail-closed，第一百三十八刀）。
+
+        为什么用**源码契约**钉：走到加仓分支需要 41 个注入依赖 + 完整因子/AI 决策夹具
+        （本文件 docstring 已注明"没有任何测试直接驱动 execute_portfolio"），
+        故这里钉**判据本身**；"上限已到 ⇒ 拦截"由 `pyramiding` 门的行为用例覆盖。
+
+        方向：`scale_count` 缺省 0 会让「每仓最多加仓 N 次」**静默失效**（可反复加仓、
+        过度集中）；读失败时 `load_trackers()` 返回标记型空字典 ⇒ 必然命中此分支。
+        """
+        up = ast.unparse(_impl_fn())
+        self.assertEqual(up.count("else MAX_SCALE_IN_COUNT"), 2,
+                         "多空两处都必须把'拿不到加仓次数'映射为上限已到")
+        self.assertEqual(up.count("追踪器缺失"), 2,
+                         "两处都要把'未知'说清楚（不许让 gate 的'已达上限'文案冒充事实）")
+
+    #: 因子字典的**全部**直接下标消费点（按相位）。新增相位读 `f[...]` 时补进来，
+    #: 判据自身也会从代码推导出键集 —— 但"哪些相位在消费因子"必须显式登记，
+    #: 否则新相位悄悄加一个 `f["x"]` 没人知道（这正是本门第一版只覆盖一部分的原因）。
+    _FACTOR_CONSUMERS = (
+        ("scripts/trader/entry_execution.py", "execute_entry_scan", "f"),
+        ("scripts/trader/cycle_stages.py", "fetch_universe_and_manage_positions", "f"),
+        ("scripts/trader/cycle_snapshot.py", "build_state_payload", "f"),
+    )
+
+    def test_factor_schema_covers_every_consumer_phase(self):
+        """因子基座必须覆盖**每个消费相位**的无条件下标键（第一百三十九/四十一刀）。
+
+        为什么：入场循环、上游相位、以及 `cycle_snapshot.build_state_payload`（落盘相位）
+        都用 `f["..."]` **直接下标**（不是 `.get`）。这些键只由
+        `factors.fetch_single_instrument_data` 的**字面量基座**提供：基座少一个键、
+        或出现第二个生产者，就会在**周期中途** KeyError ⇒ 其后的相位整段被跳过。
+
+        ⚠️ 本门第一版只扫了入场循环 + 上游 ⇒ **漏了 `build_state_payload`**
+        （它读 `f["rsi"]`/`f["type"]` 等）。本刀起改为**登记式**相位清单 + 自动推导键集。
+        """
+        from tests import source_scan as ss
+        provided = ss.dict_literal_keys("scripts/trader/factors.py",
+                                       "fetch_single_instrument_data")
+        self.assertTrue({"position", "ctVal", "price", "atr"} <= provided,
+                        f"判据失效：基座键没抓到（实际 {sorted(provided)[:8]}…）")
+        needed = set()
+        for mod, fn, var in self._FACTOR_CONSUMERS:
+            keys = ss.load_subscripts(mod, fn, var)
+            self.assertTrue(keys, f"判据失效：{mod}::{fn} 没抓到 {var}[...] 下标（相位改名了？）")
+            needed |= keys
+        self.assertTrue({"position", "ctVal", "price", "atr"} <= needed,
+                        f"判据失效：消费侧没抓到预期下标（实际 {sorted(needed)}）")
+        missing = sorted(needed - provided)
+        self.assertEqual(missing, [],
+                         "因子基座缺这些键 ⇒ 消费相位会在**周期中途** KeyError："
+                         f"{missing}")
+
+    #: 仓位块（`f["position"]`）的**直接下标**消费点（按相位）。缺键 ⇒ 管理相位
+    #: （在入场循环**之前**跑）会**周期中途** KeyError ⇒ 该轮连仓位管理都没做。
+    _POSITION_CONSUMERS = (
+        ("scripts/trader/position_exit.py", "manage_position_tp_and_trailing", "curr_pos"),
+    )
+
+    def test_position_payload_shape_covers_manage_phase(self):
+        """`f["position"]` 字面量必须覆盖管理相位的无条件下标（第一百四十二刀）。
+
+        生产侧是 `factors.fetch_single_instrument_data` 里 `f["position"] = {...}` 那**一处**
+        字面量（不是"函数内所有字典"，故用 `subscript_assign_keys` 精确取）；
+        消费侧 `position_exit.manage_position_tp_and_trailing` 读 `curr_pos["pos"]`/
+        `["side"]`/`["avgPx"]`/`["upl"]` —— 全是直接下标。
+
+        为什么值得钉：该相位在入场循环**之前**执行，一旦 KeyError，整轮周期中断
+        （连存量仓位的止盈/移动止损都不再处理），而问题只在"某个所返回的仓位缺字段"
+        时才暴露 —— 属"某天某所一变就炸"的隐患。
+        """
+        from tests import source_scan as ss
+        provided = ss.subscript_assign_keys(
+            "scripts/trader/factors.py", "fetch_single_instrument_data", "f", "position")
+        # 自检只钉**最不可少**的两个键：把 avgPx/upl 留给覆盖断言去抓
+        # （否则删掉它们时先撞自检，覆盖断言永远得不到负例证明）
+        self.assertTrue({"pos", "side"} <= provided,
+                        f"判据失效：仓位块键没抓到（实际 {sorted(provided)}）")
+        for mod, fn, var in self._POSITION_CONSUMERS:
+            with self.subTest(consumer=f"{mod}::{fn}"):
+                needs = ss.load_subscripts(mod, fn, var)
+                self.assertTrue(needs, f"判据失效：{mod}::{fn} 没抓到 {var}[...] 下标")
+                missing = sorted(needs - provided)
+                self.assertEqual(missing, [],
+                                 f"{fn} 读仓位块的 {missing} 生产侧不提供 "
+                                 "⇒ 管理相位**周期中途** KeyError（其后相位全跳过）")
 
     def test_facade_call_passes_every_parameter_once_same_name(self):
         params = [a.arg for a in _impl_fn().args.kwonlyargs]

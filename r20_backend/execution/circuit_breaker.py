@@ -11,6 +11,7 @@ from scripts.risk_constants import STOP_COOLDOWN_MINUTES
 from r20_backend.time_utils import beijing_day
 from r20_backend.execution.sizing import effective_daily_loss_limit
 from r20_backend.execution.cooldowns import (
+    add_stop_cooldown as _cooldowns_add,
     is_in_stop_cooldown as _cooldowns_is_in,
     load_stop_cooldowns as _cooldowns_load,
     read_stop_cooldowns_state as _cooldowns_read_state,
@@ -32,13 +33,25 @@ def _sync_status_path():
     return DATA_DIR / "ledger_sync_status.json"
 
 
-def _ledger_sync_failed_venues(max_age_seconds: float = 2700.0) -> list[str]:
-    """读台账同步旁车：返回最近一次同步 failed 的所列表。旁车缺失/过旧/损坏
-    一律返回空（过旧场景由 ledger 文件 file_health 的 STALE 通道兜底）。"""
+def _ledger_sync_sidecar_state(max_age_seconds: float = 2700.0) -> tuple[list[str], str]:
+    """读台账同步旁车，返回 `(failed_venues, unknown_reason)`（第一百四十四刀）。
+
+    - `unknown_reason == ""` ⇒ 判定有效；
+    - 非空 ⇒ **不可判定**：旁车**损坏**或**过旧**（> `max_age_seconds`）——
+      此时"跨所同步是否完整"无从得知，当日亏损求和**可能不完整**。
+
+    ⚠️ **修正一处不实陈述**：旧 docstring 写"过旧场景由 ledger 文件 file_health 的
+    STALE 通道兜底"，但两个调用方（本模块 `is_circuit_breaker_active` 与 trader 侧
+    `circuit_guard`）**都没有**任何 STALE/file_health 检查（全仓 grep 仅命中那句注释本身）
+    ⇒ 该补偿**并不存在**。本刀先把"不可判定"**如实暴露**（调用方打印 warn），
+    **行为保持不变**（仍不据此禁开仓）——方向是否改为 fail-closed 需人工拍板。
+
+    缺失旁车仍是 `([], "")`（全新环境尚未同步过，不应把开仓全停）。
+    """
     try:
         path = _sync_status_path()
         if not path.exists():
-            return []
+            return [], ""
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         generated_at = str(payload.get("generated_at") or "")
@@ -46,7 +59,7 @@ def _ledger_sync_failed_venues(max_age_seconds: float = 2700.0) -> list[str]:
             ts = datetime.datetime.fromisoformat(generated_at)
             age = (datetime.datetime.now(ts.tzinfo) - ts).total_seconds()
             if age > max_age_seconds:
-                return []
+                return [], f"旁车过旧（{age:.0f}s > {max_age_seconds:.0f}s）"
         failed = []
         for v, d in (payload.get("venues") or {}).items():
             if not (isinstance(d, dict) and d.get("status") == "failed"):
@@ -69,9 +82,18 @@ def _ledger_sync_failed_venues(max_age_seconds: float = 2700.0) -> list[str]:
                 except Exception:
                     pass
             failed.append(str(v))
-        return failed
-    except Exception:
-        return []
+        return failed, ""
+    except Exception as exc:
+        return [], f"旁车损坏/不可读（{exc!r}）"
+
+
+def _ledger_sync_failed_venues(max_age_seconds: float = 2700.0) -> list[str]:
+    """**兼容壳**：只返回 failed 列表（调用方签名与既有测试契约不变）。
+
+    ⚠️ 注意它的盲区：**不可判定的情形不会体现在这个列表里**（旁车损坏/过旧都返回 `[]`）。
+    需要区分"没有失败所"与"不知道"的调用方，请用 `_ledger_sync_sidecar_state`。
+    """
+    return _ledger_sync_sidecar_state(max_age_seconds)[0]
 # 审计③(2026-09-13)：文件名分裂修复——旧值（复数 .json）与 trader 活文件
 # stop_cooldown.json（单数）互不可见；若后端接平仓写复数而 trader 消费单数，冷却
 # 静默失效。归一到既成事实文件名（两边 key/schema 本就同构）。
@@ -181,21 +203,13 @@ def _atomic_write_json(path, payload) -> None:
 
 
 def add_stop_cooldown(inst_id: str, side: str, reason: str = "止损冷却") -> None:
-    cooldowns, corrupt = _read_stop_cooldowns_state()
-    if corrupt:
-        print(f"[止损冷却] CRITICAL 状态文件损坏，拒绝合并写回保全现场: {STOP_COOLDOWN_FILE}")
-        return
-    key = f"{inst_id}_{side}"
-    cooldowns[key] = {
-        "instId": inst_id,
-        "side": side,
-        "ts": int(time.time()),
-        "reason": reason,
-    }
-    try:
-        _atomic_write_json(STOP_COOLDOWN_FILE, cooldowns)
-    except Exception as e:
-        print(f"[止损冷却] warn 落盘失败: {e}")
+    """薄壳：转调单一事实源（`cooldowns.add_stop_cooldown`，第一百四十八刀）。
+
+    ⚠️ 文件路径与原子写函数都**在调用时**从本模块全局解析（测试会 patch
+    `cb.STOP_COOLDOWN_FILE`；import 期烘焙会让补丁静默失效）。
+    """
+    return _cooldowns_add(inst_id, side, STOP_COOLDOWN_FILE, reason=reason,
+                          atomic_write_json=_atomic_write_json)
 
 
 def is_in_stop_cooldown(inst_id: str, side: str) -> bool:
@@ -265,10 +279,23 @@ def is_circuit_breaker_active(usdt_available: Optional[float] = None, fetch_cand
             return True, f"熔断状态文件损坏，安全暂停开仓: {e}"
 
     if LEDGER_JSON_FILE.exists():
-        _failed_venues = _ledger_sync_failed_venues()
-        if _failed_venues:
-            return True, ("台账跨所同步不完整（失败所: " + ",".join(_failed_venues) +
-                          "），当日亏损求和不可判全，安全暂停开仓")
+        # 第一百四十七刀：与 trader 孪生版**结构对称** —— 旁车读取本身若抛（助手理论上
+        # 内部已全覆盖，但"理论上不会抛"不是契约），也必须 fail-closed，而不是让异常
+        # 逃出本函数（逃出去由调用方决定，方向就不可控了）。
+        try:
+            _failed_venues, _sidecar_unknown = _ledger_sync_sidecar_state()
+            if _sidecar_unknown:
+                # ⚠️ 用户拍板 fail-closed（第一百四十四刀）：**不可判定 ≠ 安全** ——
+                # 旁车损坏/过旧 ⇒ "跨所同步是否完整"无从得知 ⇒ 当日亏损求和可能不完整，
+                # 此时必须禁开仓（仓位管理与既有保护不受影响）。
+                return True, (f"台账同步状态不可判定（{_sidecar_unknown}）⇒ 当日亏损求和不可判全，"
+                              "安全暂停开仓")
+            if _failed_venues:
+                return True, ("台账跨所同步不完整（失败所: " + ",".join(_failed_venues) +
+                              "），当日亏损求和不可判全，安全暂停开仓")
+        except Exception as _sidecar_exc:      # noqa: BLE001 - 风险路径：宁可停，不可漏
+            # 与 trader 孪生版**同范围**：整个旁车判定块都在保护范围内
+            return True, f"台账同步旁车检查不可用，安全暂停开仓: {_sidecar_exc}"
         try:
             with open(LEDGER_JSON_FILE, "r", encoding="utf-8") as f:
                 ledger = json.load(f)

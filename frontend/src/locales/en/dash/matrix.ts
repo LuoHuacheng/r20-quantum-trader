@@ -32,7 +32,7 @@ export const enMatrix = {
     col: {
       symbol: 'Symbol',
       dir: 'Side',
-      qty: 'Size',
+      qty: 'Margin',
       entry: 'Avg entry',
       mark: 'Mark',
       liq: 'Liq. price',
@@ -45,8 +45,36 @@ export const enMatrix = {
       oco: 'Cloud OCO',
     },
     ocoOk: 'Armed',
+    triggerMark: 'mark-price trigger',
+    triggerLast: 'last-price trigger',
+    triggerIndex: 'index-price trigger',
+    triggerUnknown: 'trigger type not reported',
+    triggerMarkPrice: 'mark-price trigger',
+    triggerContractPrice: 'contract-price trigger (≈ last)',
+    triggerRawCodeHint: 'Raw code reported by the venue; this repo has not verified its official mapping, so it is shown verbatim',
+    triggerMarkHint: 'This protective leg triggers on mark price (wick-resistant)',
+    triggerLastHint: 'This leg triggers on last traded price: a single wick can knock it out early',
+    triggerIndexHint: 'This leg triggers on index price',
+    triggerUnknownHint: 'The venue did not report this leg\'s trigger price type: when it fires is undecidable',
     ocoMiss: 'Missing',
     ocoMissHint: 'No exchange-side protection',
+    orphanPill: 'orphan legs',
+    orphanHint: 'This venue has protective legs attributable to us with no matching position. '
+      + 'They can reduce a NEW position on the same symbol, so an operator must review and '
+      + 'cancel them explicitly (the system never cancels automatically).',
+    unclassifiedPill: 'unreadable legs',
+    unclassifiedHint: 'This venue has protective legs that were read but cannot be classified '
+      + '(no tag of ours, unrecognized type name, or an unparsable row). They are NOT counted '
+      + 'as coverage, so coverage may be UNDERESTIMATED (which can cause duplicate legs); review.',
+    mismatchPill: 'legs unmatched',
+    mismatchHint: 'This venue has protective legs whose side or size matches no position: '
+      + 'side-mismatched legs are NOT counted as coverage (a reversed leg cannot protect this '
+      + 'position); size-mismatched legs ARE counted as coverage but their provenance is unclear '
+      + '(possibly left over from an old position; they can still reduce), so review them.',
+    orphanUnknownPill: 'orphan legs unknown',
+    orphanUnknownHint: 'This venue has unattributable protective legs (no tag, no matching ledger '
+      + 'record) - possibly manual orders; by discipline they are never touched.',
+    orphanReadFailHint: 'Leg read failed, so orphan status is undecidable (not readable != none)',
     aiManaged: 'AI-managed positions',
     scaleOutPill: 'Half BE',
     scaleOutTitle: '50% profit locked, remainder at breakeven',
@@ -61,7 +89,7 @@ export const enMatrix = {
       dir: 'Side',
       type: 'Type',
       price: 'Price',
-      qty: 'Size',
+      qty: 'Margin',
       sl: 'Planned SL',
       tp: 'Planned TP',
       placed: 'Placed',
@@ -69,6 +97,7 @@ export const enMatrix = {
     },
     decisionTime: 'Inference time',
     cancel: 'Cancel',
+    contractsUnit: 'Cont',
     aiManaged: 'AI-managed orders',
     cancelTitle: 'Cancel order',
     cancelDesc: '{dir} limit order for {sym} @ {price} will be canceled.',

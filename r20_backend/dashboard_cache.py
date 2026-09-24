@@ -293,8 +293,12 @@ def update_cache_cycle():
             stale = dict(CACHE_DATA)
             stale_positions = (stale.get("positions_summary") or {}).get("items", [])
             enrich_position_risk_fields(stale_positions, trackers)
+            # 第一百九十七刀：陈旧分支是**上次成功载荷的拷贝**，会带着 `is_stale=False`
+            # ⇒ 必须显式改真，否则前端永远看不出这是旧数据。
+            _stale_status = "NOT_READY" if _private_not_ready else "STALE"
+            stale["is_stale"] = True
             stale["data_health"] = {
-                "status": "NOT_READY" if _private_not_ready else "STALE",
+                "status": _stale_status,
                 "partial": True,
                 "errors": source_errors,
                 "message": _NOT_READY_TEXT if _private_not_ready else None,
@@ -330,8 +334,15 @@ def update_cache_cycle():
                                   enrich_position_risk_fields, trackers)
     # 2.5 Multi-Venue Parity: Aggregate active positions & open orders from Binance & Gate
     # （阶段 2·B2 第七刀：整段迁至 dashboard_payload/multi_venue.py）
+    # 第一百七十五刀：孤儿腿归属取证要台账行（只读；读不到 ⇒ None ⇒ 候选可能偏少，面板会披露）
+    try:
+        from scripts.trader.venue_protection import read_ledger_rows as _read_ledger_rows
+        _ledger_rows_for_attr = _read_ledger_rows(LEDGER_JSON_FILE)
+    except Exception:
+        _ledger_rows_for_attr = None
     long_count, short_count, total_pos_upl = _core_collect_cross_venue_positions(
-        positions, pending_orders_list, long_count, short_count, total_pos_upl)
+        positions, pending_orders_list, long_count, short_count, total_pos_upl,
+        source_errors=source_errors, ledger_rows=_ledger_rows_for_attr)
     # 3. Read Reset Initial State（阶段 2·B2 第九刀：迁至 dashboard_payload/reset_state.py）
     # 步4·账号分区：基线按当前账号读，避免换账号后旧账号的 reset_time 继续框住 KPI 窗口。
     # 账号轴解析失败 → None → 回落扁平（旧行为），绝不靠猜。

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List
@@ -43,6 +44,15 @@ class TestPolicySnapshotIsolated(unittest.TestCase):
         env_patcher = patch.object(settings_store, "ENV_FILE", Path(env_tmp.name) / ".env")
         env_patcher.start()
         self.addCleanup(env_patcher.stop)
+        # ⚠️ 写完 `.env` 之后 `update_env` 还会把 MANAGED_KEYS **同步进本进程的
+        # `os.environ`**（settings_store.py 末尾），而 `os.environ` 不在上面两处沙箱
+        # 的射程内 —— 实测本类会漏一个 `R20_MIN_LEVERAGE=2.0` 给同进程后续用例，
+        # 把任何 `os.getenv("R20_MIN_LEVERAGE")` 的回落从 3.0 改成 2.0
+        # （以 `R20_MIN_LEVERAGE` 为键的全量探针复现，唯一漏点在本类）。
+        # `patch.dict` 整份快照并在退出时原样还原，**新增键也会被摘掉**。
+        os_patcher = patch.dict(os.environ)
+        os_patcher.start()
+        self.addCleanup(os_patcher.stop)
         self.base_prompt_profile: Dict[str, Any] = {
             "id": "stable",
             "name": "全维度波段强化版",

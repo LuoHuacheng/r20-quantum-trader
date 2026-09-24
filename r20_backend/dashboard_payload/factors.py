@@ -8,6 +8,8 @@ FACTOR_LIBRARY_FILE / AI_DECISIONS_FILE / STATE_JSON_FILE），故按 B4/B5/B6 �
 from __future__ import annotations
 
 import json
+
+from r20_backend.dashboard_payload.readers import load_json_dict_disclosed
 import os
 
 from r20_backend.dashboard_payload.market import _safe_float
@@ -18,12 +20,12 @@ __all__ = ["load_position_trackers", "enrich_position_risk_fields",
 
 
 def load_position_trackers(tracker_file: str | os.PathLike[str]):
-    try:
-        with open(tracker_file, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    """读持仓追踪（面板侧）。第 52 刀起委托 **共享披露读取器**（见 `readers`）。
+
+    行为保持兼容（读不到仍返回 `{}`），但**不再静默**：失败会打一行 warn，
+    让"没有数据"与"读不到"在日志里可区分（面板字段仍旧为空）。
+    """
+    return load_json_dict_disclosed(tracker_file)[0]
 
 
 def enrich_position_risk_fields(tracker_file: str | os.PathLike[str], positions, trackers=None):
@@ -65,6 +67,15 @@ def enrich_position_risk_fields(tracker_file: str | os.PathLike[str], positions,
             "displayTakeProfit": exchange_tp or tracker_tp or None,
             "stageDesc": position.get("stageDesc") or tracker.get("stage_desc") or "持有监控中",
             "strategyTag": position.get("strategyTag") or tracker.get("strategy_tag") or ("顺势做多" if "long" in side else "逢高做空"),
+            # 第一百九十八刀：把 tracker 里**真实存在**的切分止盈状态接到行上。
+            # 面板 `PositionsOrdersPanel.vue` 一直在读 `scaleOutPhase`/`scaleOutTp`
+            # （`(p.scaleOutPhase ?? 0) >= 1` 决定徽标、`p.scaleOutTp` 决定 TP 显示），
+            # 而这两个键**后端从未发过** ⇒ 徽标永远不亮、TP 永远走别的来源。
+            # 数据就在 tracker 里（`scripts/trader/scale_out.py` 写 `scale_out_phase`/
+            # `scale_out_tp`），只是没被接出来。**缺席即缺席**：tracker 没这项就不写这一项
+            # （不写 0 —— 币安/Gate 行本来就没有 tracker，写成 0 等于替它们断言"未开始"）。
+            **({"scaleOutPhase": int(float(tracker.get("scale_out_phase")))} if str(tracker.get("scale_out_phase", "")).strip() not in ("", "None") else {}),
+            **({"scaleOutTp": float(tracker.get("scale_out_tp"))} if str(tracker.get("scale_out_tp", "")).strip() not in ("", "None") else {}),
             "cloudProtectionLastVerified": (tracker.get("cloudProtection") or {}).get("verifiedAt"),
             "cloudProtectionLastDetail": (tracker.get("cloudProtection") or {}).get("detail"),
         })

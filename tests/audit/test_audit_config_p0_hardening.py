@@ -296,6 +296,13 @@ class RouterMarginClampTests(_SandboxBase):
             def _keys(self):
                 return ("k", "s")
 
+            def detect_position_mode(self):
+                # 第八刀：router 新增持仓模式只读体检（policy：探测不到就禁新开仓）。
+                # 本桩继承真实 GateAdapter（声明 position_modes）但打桩了私有 IO，
+                # 探测会返回 unknown ⇒ 整条开仓路径被拒。桩必须像真适配器一样**明确**
+                # 给出模式，否则这些用例测的就不再是它们本来要测的东西。
+                return "single"
+
             def positions(self):
                 return []
 
@@ -342,8 +349,10 @@ class RouterMarginClampTests(_SandboxBase):
         self.assertTrue(r["ok"], r.get("detail"))
         self.assertEqual(r["margin_usdt"], 200.0)
         self.assertEqual(r["margin_clamped_from_usdt"], 5000.0)
-        # 200U × 3x = 600U 名义 @79000、每张面值 0.0001 → 75.95 → 76 张
-        self.assertEqual([c for c in ad.calls if c[0] == "place"][0][3], 76)
+        # 200U × 3x = 600U 名义 @79000、每张面值 0.0001 → 75.95 张 → **75**
+        # （向下取整，第一百五十三刀用户拍板；原四舍五入→76，会最坏向上多买半张、
+        #   在大面值标的上使实际名义超出按笔保证金上限）
+        self.assertEqual([c for c in ad.calls if c[0] == "place"][0][3], 75)
 
     def test_router_applies_absolute_cap_even_without_caller_cap(self):
         ad = self._stub_adapter()

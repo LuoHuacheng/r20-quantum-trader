@@ -327,6 +327,13 @@ class VenuePoolGateTests(_Base):
             def _keys(self):
                 return ("k", "s")
 
+            def detect_position_mode(self):
+                # 第八刀：router 新增持仓模式只读体检（policy：探测不到就禁新开仓）。
+                # 本桩继承真实 GateAdapter（声明 position_modes）但打桩了私有 IO，
+                # 探测会返回 unknown ⇒ 整条开仓路径被拒。桩必须像真适配器一样**明确**
+                # 给出模式，否则这些用例测的就不再是它们本来要测的东西。
+                return "single"
+
             def positions(self):
                 self.calls.append(("positions",))
                 return list(self._positions)
@@ -401,7 +408,18 @@ class VenuePoolGateTests(_Base):
         self.assertTrue(res["ok"], res.get("detail"))
         self.assertEqual(res["margin_usdt"], 120.0)
         self.assertEqual(res["margin_clamped_from_usdt"], 300.0)
-        self.assertIn("该所预算", "该所预算 120U")
+        # 第二百零三刀：这里原本是 `assertIn("该所预算", "该所预算 120U")` ——
+        # **字面量自证**（拿一个常量断言它包含自己），与代码毫无关系 ⇒ 恒真、白占一行。
+        # 现在改成**捕获真日志**：夹仓消息必须点名"该所预算"与实际夹到的上限，
+        # 这样"用例名说 venue budget"才是真的被验证了。
+        from contextlib import redirect_stdout
+        import io as _io
+        _buf = _io.StringIO()
+        with redirect_stdout(_buf):
+            self._run(pool={"margin_per_trade_usdt": 120.0}, margin_usdt=300.0)
+        _log = _buf.getvalue()
+        self.assertIn("该所预算", _log, f"夹仓日志没说清哪道上限生效：{_log!r}")
+        self.assertIn("120U", _log, f"夹仓日志没报夹到的上限：{_log!r}")
 
     def test_min_confidence_gate(self):
         res, ad = self._run(pool={"min_confidence": 90.0}, confidence=88.0)

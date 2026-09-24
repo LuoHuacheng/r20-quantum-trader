@@ -9,6 +9,8 @@ import os
 import sys
 from pathlib import Path
 
+from r20_backend.math_utils import safe_float as _shared_safe_float
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = Path(PROJECT_ROOT)
 SCRIPTS_DIR = os.path.join(PROJECT_ROOT, "scripts")
@@ -235,11 +237,12 @@ def single_brain_cycle(func):
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        result = float(value)
-        return result if result == result and abs(result) != float("inf") else default
-    except (TypeError, ValueError):
-        return default
+    """薄壳：转调单一事实源（`r20_backend.math_utils.safe_float`，第一百五十刀）。
+
+    语义与既有实现逐条一致（`nan`/`±inf`/不可转 ⇒ `default`；`bool` 按 `float()`）——
+    只是不再各写一份（三份等价实现的漂移代价是"因子与风控静默算出不同的数"）。
+    """
+    return _shared_safe_float(value, default)
 
 
 def is_same_direction_scale_request(position_side: str, action: str) -> bool:
@@ -275,6 +278,19 @@ def read_prompt_override() -> str:
 _SL_ATR_BY_ASSET_CLASS = {"commodity": 1.3, "index": 1.2, "stock": 1.3, "crypto": 1.4}
 
 
+def _prefer_pool_inst(candidate: str, current: str) -> bool:
+    """同币多合约时的**确定性**优选（顺序无关）：USDT 永续优先，其次字典序更小。
+
+    为什么需要它：`setdefault` 的"首值优先"会把选择权交给 `TARGET_INSTRUMENTS` 的排列顺序，
+    那是**静默的任意选择**（改一行配置就换了合约）。本函数让它可解释、可复现。
+    """
+    cand_swap = str(candidate).endswith("-USDT-SWAP")
+    curr_swap = str(current).endswith("-USDT-SWAP")
+    if cand_swap != curr_swap:
+        return cand_swap
+    return str(candidate) < str(current)
+
+
 def canonical_position_inst_id(raw: Any) -> str:
     """跨所持仓符号 → OKX 形态（审计 P2-12，模块级便于直接测试）。
 
@@ -285,15 +301,32 @@ def canonical_position_inst_id(raw: Any) -> str:
     if not text:
         return ""
     bare = text.split(":")[-1]
+    # 第一百八十三刀：这里原本是 `pool_by_base.setdefault(base, iid)` —— **首值优先**，
+    # 于是"同一个币有多个池内合约"时选哪个**取决于 TARGET_INSTRUMENTS 的顺序**（静默的
+    # 任意选择；增删一个条目就会换合约，进而换下单标的）。真机核对：当前 9 个目标合约
+    # **同币重复为 0**，所以这是潜在风险而非现行错误。改成**与顺序无关的确定性优选**：
+    #   1) 优先标准 USDT 永续（`BASE-USDT-SWAP`）；
+    #   2) 其余按字典序取最小。
     pool_by_base: Dict[str, str] = {}
     for item in (TARGET_INSTRUMENTS if isinstance(TARGET_INSTRUMENTS, list) else []):
         iid = str((item or {}).get("instId") or "").strip().upper()
-        if iid:
-            pool_by_base.setdefault(_canonical_base_name(iid), iid)
+        if not iid:
+            continue
+        base = _canonical_base_name(iid)
+        current = pool_by_base.get(base)
+        if current is None or _prefer_pool_inst(iid, current):
+            pool_by_base[base] = iid
     base = _canonical_base_name(bare)
-    if base in pool_by_base:
+    # 第一百八十五刀：`canonical_base` 修好"非 USDT 计价"的提取后（`BTC-USDC` → `BTC`、
+    # `BTC-USD-SWAP` → `BTC`），**池查找必须加一道"标准形态"闸**，否则币本位/日期合约
+    # 会因为币种相同而被映射到池内的 **USDT 永续**（`BTC-USD-SWAP` → `BTC-USDT-SWAP`）——
+    # 那是**换了下单标的**，直接违背本函数"其余原样保留，绝不假装认识"的契约
+    # （既有用例 `test_unknown_forms_are_preserved_verbatim` 当场判红，救回一刀）。
+    standard = bool(base) and bare in (base, f"{base}USDT", f"{base}_USDT",
+                                       f"{base}-USDT", f"{base}-USDT-SWAP")
+    if standard and base in pool_by_base:
         return pool_by_base[base]
-    if base and bare in (base, f"{base}USDT", f"{base}_USDT", f"{base}-USDT", f"{base}-USDT-SWAP"):
+    if standard:
         return f"{base}-USDT-SWAP"
     return text
 

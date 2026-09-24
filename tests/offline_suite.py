@@ -227,6 +227,10 @@ class OfflineGuard:
                 # 过 `_log_diagnostics` 记栈，唯独这里直接 raise。实测 17 个
                 # `.llm_models.json-*` 尝试被 raise 后又被调用方 try/except
                 # 吞掉 ⇒ 套件零报错、只在汇总里露一次，永远查不到"是谁写的"。
+                # ⚠️ 只写诊断文件**不够**：`_log_diagnostics` 会被"patch 掉 open
+                # 的文件隔离用例"挡掉（实测整份日志 0 行）⇒ 与网络/spawn 同规
+                # 再记一份**不依赖文件 IO** 的 `BLOCK_ORIGINS` 计数。
+                self._note_origin(self._origin())
                 self._log_diagnostics('protected-write', args[:2])
                 raise RuntimeError('Offline suite blocked real resource mutation')
 

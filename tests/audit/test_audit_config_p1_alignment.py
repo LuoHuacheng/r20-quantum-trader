@@ -27,6 +27,29 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 
+_READ_SCOPE = None
+
+
+def setUpModule():
+    """显式声明生产读（第二百三十六刀）：
+    本文件把**线上**提示词库抄进沙箱，核对线上布局与契约对齐 —— 有意的线上守卫。
+
+    只读、不改；声明在此是为了把「依赖线上配置内容」从**静默**变成**可审计**
+    （守卫见 `tests/__init__.py`；`R20_TESTS_STRICT_READS=1` 下未声明的读会报错）。
+    """
+    global _READ_SCOPE
+    from tests import allow_real_data_reads
+    _READ_SCOPE = allow_real_data_reads()
+    _READ_SCOPE.__enter__()
+
+
+def tearDownModule():
+    global _READ_SCOPE
+    if _READ_SCOPE is not None:
+        _READ_SCOPE.__exit__(None, None, None)
+        _READ_SCOPE = None
+
+
 class _SandboxBase(unittest.TestCase):
     def setUp(self):
         # 先导入相关模块再隔离：isolate_config 只重定向**已导入**模块里的 data/ 路径，
@@ -324,11 +347,22 @@ class PortfolioBudgetHonestyTests(_SandboxBase):
 
     @classmethod
     def setUpClass(cls):
-        # 同 test_venue_accounts_endpoint：r20_backend.dashboard_cache 导入即点火 2s 后台线程（真调 OKX）→ 永久钉死
+        # 同 test_venue_accounts_endpoint：r20_backend.dashboard_cache 导入即点火 2s 后台线程（真调 OKX）
+        # → 本类期间钉死循环体。
+        # ⚠️ 第一百二十五刀：**必须还原**。此前不还原 ⇒ 整个测试进程里
+        # `dashboard_cache.update_cache_cycle` 都是 no-op，任何真调它的用例
+        # （如 `tests/ui/test_protection_gap_reaches_data_health.py`）只会拿到空
+        # `CACHE_DATA`（整包跑 KeyError('data_health')、单跑通过 —— 实测踩到）。
         import r20_backend.dashboard_cache as dashboard_app
         dashboard_app.stop_dashboard_background_worker()
+        cls._orig_update_cache_cycle = dashboard_app.update_cache_cycle
         dashboard_app.update_cache_cycle = lambda *a, **k: None
         cls.dashboard = dashboard_app
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dashboard.update_cache_cycle = cls._orig_update_cache_cycle
+        cls.dashboard.stop_dashboard_background_worker()
 
     def setUp(self):
         super().setUp()

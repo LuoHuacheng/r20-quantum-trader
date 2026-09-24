@@ -19,6 +19,60 @@ def skip_if_offline_suite(test, reason='本用例以 spawn 子进程/网络栈�
         test.skipTest(reason)
 
 
+def isolate_router_execution(assets=("BTC", "ETH", "UNI")):
+    """封闭执行路由用例的两处 **ambient 依赖**：执行开闸 + per-venue 所池。
+
+    两者都是宿主 `.env` / `data/venue_routing.json` 注入的**现场值**，与本类用
+    例要验的语义无关，但会把用例卡在它们到不了的那一步：
+
+    - **闸门默认关**：`require_execution` 直接抛 `ExchangeCapabilityError`，
+      持仓模式 / 拒开阶段一律测不到（live 与 demo 两档旗标都置位，
+      适配器均为桩，无真实下单面）；
+    - **池 `dry_run=true`**（现场演算配置）：一律停在 `venue_dry_run`；
+      `assets` 为空时还会先停在 `venue_pool`（空池=不发单）。
+
+    只动这两个 knob：保证金预算 / `max_open` / 置信度仍走**真实加载器**，
+    不改变任何夹取结果。`assets` 只做**并集补充**（保留现场已有准入币种，
+    只保证用例要用的那几个在列表里）。
+
+    返回还原函数，调用方在 `tearDownModule` 里执行。
+    """
+    gate_flags = ("R20_GATE_TESTNET", "R20_GATE_DEMO_EXECUTION", "R20_GATE_EXECUTION")
+    backup = {k: os.environ[k] for k in gate_flags if k in os.environ}
+    for flag in gate_flags:
+        os.environ.pop(flag, None)
+    # live 与 demo 两档都开：本模块的用例会按 `adapter.environment` 选档（
+    # `require_execution` 按档查旗标），适配器全是桩，不存在真实下单面。
+    os.environ["R20_GATE_EXECUTION"] = "1"
+    os.environ["R20_GATE_DEMO_EXECUTION"] = "1"
+
+    # ⚠️ 钉**数据源**（`routing_policy.load_venue_pool`）而不是路由器上的薄包装
+    # `_load_venue_pool_soft`：本仓有用例为了验「常量模块缺失」而 `importlib.reload`
+    # 执行路由器，reload 会把模块顶层名字整体重绑 —— 钉在路由器上的补丁会被静默
+    # 冲掉（实测：单跑绿、整模块跑红）。`_load_venue_pool_soft` 内部是**调用时**
+    # `from ... import load_venue_pool`，所以钉数据源对 reload 免疫。
+    from r20_backend.exchanges import routing_policy as _routing
+    real_pool = _routing.load_venue_pool
+
+    def _permissive_pool(venue):
+        pool = dict(real_pool(venue))
+        pool["dry_run"] = False
+        pool["assets"] = list(dict.fromkeys(
+            [*(pool.get("assets") or []), *(a.upper() for a in assets)]))
+        return pool
+
+    pool_patch = patch.object(_routing, "load_venue_pool", _permissive_pool)
+    pool_patch.start()
+
+    def restore():
+        pool_patch.stop()
+        for flag in gate_flags:
+            os.environ.pop(flag, None)
+        os.environ.update(backup)
+
+    return restore
+
+
 def isolate_config(test):
     temp = tempfile.TemporaryDirectory(prefix='r20-test-config-')
     test.addCleanup(temp.cleanup)
@@ -90,6 +144,12 @@ def isolate_config(test):
                  # 逐个确认过：15 个都能在**零副作用**下 import
                  # （无网络、无起进程、无端口绑定），与既有白名单同性质。
                  # 对应回归测试：`tests/audit/test_production_data_isolation.py`。
+                 # ---- 第一百一十四刀补：风控预留库（`data/risk_reservation.db`）。
+                 # 实测两处测试**只夹带渲染仪表盘**就经 `dashboard_payload.market`
+                 # 的 `get_manager()` 连到生产预留库（`RiskReservationManager.__init__`
+                 # 会建表）——而本模块此前既不在白名单、常量又是惰性 import 后才求值，
+                 # 于是永远没人重定向它。白名单 import 保证"先 import 后重定向"的顺序。
+                 'r20_backend.risk_reservation',
                  'r20_backend.account_baseline',
                  'r20_backend.admin_auth',
                  'r20_backend.backup_secrets',
@@ -124,7 +184,22 @@ def isolate_config(test):
             try:
                 relative = Path(value).relative_to(project / 'data')
             except ValueError:
-                continue
+                # ⚠️ 第二百三十五刀：会话级配置沙箱（`tests/__init__.py`）会把
+                # `prompt_library.LIBRARY_FILE` 之类的常量挪到 /tmp 下 —— 那些值不在
+                # `project/data` 前缀里，按原规则会被**跳过**，于是本沙箱反而"管不到"它们
+                # （实测 `test_config_sandbox.py::test_nested_policy_paths_share_one_sandbox`
+                # 就是这么红的）。这里把会话沙箱下的常量**接管**进来：更具体的沙箱优先。
+                from tests import session_sandbox_roots
+
+                relative = None
+                for sroot in session_sandbox_roots():
+                    try:
+                        relative = Path(value).relative_to(sroot)
+                    except ValueError:
+                        continue
+                    break
+                if relative is None:
+                    continue
             target = root / 'data' / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             replacement = str(target) if isinstance(value, str) else target
@@ -143,4 +218,13 @@ def isolate_config(test):
             "0 0" if args[0] == "rev-list" else "test" if args[0] == "branch" else
             "" if args[0] in ("fetch", "status") else "abc1234"))
         git_probe.start(); test.addCleanup(git_probe.stop)
+    # ⚠️ 只重定向常量还不够：`risk_reservation.get_manager()` 缓存了进程级实例，
+    # 一旦某次未沙箱调用先建了实例，它会**永久指向生产库**（实测污染源）。
+    # 清缓存才能让新常量真正生效。
+    try:
+        import r20_backend.risk_reservation as _rr
+        _rr.reset_default_manager()
+    except Exception:
+        pass
+
     return root

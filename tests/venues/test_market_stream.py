@@ -365,6 +365,10 @@ class CliTest(unittest.TestCase):
 
     def test_module_import_does_not_pull_a_websocket_library(self):
         """本模块被 import 时不该拉起网络栈（websockets 只在 probe 里延迟导入）。"""
+        # 判据要一个**干净解释器**来观察 `sys.modules`，只能起子进程；而离线护栏的
+        # 本职就是拦子进程 ⇒ 离线套件下如实跳过（见 skip_if_offline_suite）。
+        from tests.config_sandbox import skip_if_offline_suite
+        skip_if_offline_suite(self, "判据需要干净子进程 import，离线护栏按约定拦子进程")
         import subprocess
         code = ("import sys; sys.path.insert(0, '%s'); import scripts.market_stream; "
                 "print('websockets' in sys.modules)" % ROOT)

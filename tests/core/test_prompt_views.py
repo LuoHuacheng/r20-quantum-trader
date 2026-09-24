@@ -169,7 +169,9 @@ class RenderedSnapshotsTests(unittest.TestCase):
 class TemplateTests(unittest.TestCase):
     def test_the_real_data_dir_is_under_the_repo_root(self):
         self.assertEqual(PV.DATA, PV.ROOT / "data")
-        self.assertTrue(str(PV.ROOT).endswith("r20"))
+        # 判据是「锚在仓库根」而不是「目录名叫 r20」：检出目录叫什么与这条不变量无关，
+        # 拿目录名字面量当判据换个仓库名就假红（实测本仓检出为 `r20-quantum-trader`）。
+        self.assertEqual(PV.ROOT, Path(PV.__file__).resolve().parents[1])
 
     def test_the_evolution_template_exposes_its_slots(self):
         for slot in ("timestamp_beijing", "existing_memory_markdown", "total",

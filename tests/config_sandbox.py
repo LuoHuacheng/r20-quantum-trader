@@ -19,6 +19,60 @@ def skip_if_offline_suite(test, reason='本用例以 spawn 子进程/网络栈�
         test.skipTest(reason)
 
 
+def isolate_router_execution(assets=("BTC", "ETH", "UNI")):
+    """封闭执行路由用例的两处 **ambient 依赖**：执行开闸 + per-venue 所池。
+
+    两者都是宿主 `.env` / `data/venue_routing.json` 注入的**现场值**，与本类用
+    例要验的语义无关，但会把用例卡在它们到不了的那一步：
+
+    - **闸门默认关**：`require_execution` 直接抛 `ExchangeCapabilityError`，
+      持仓模式 / 拒开阶段一律测不到（live 与 demo 两档旗标都置位，
+      适配器均为桩，无真实下单面）；
+    - **池 `dry_run=true`**（现场演算配置）：一律停在 `venue_dry_run`；
+      `assets` 为空时还会先停在 `venue_pool`（空池=不发单）。
+
+    只动这两个 knob：保证金预算 / `max_open` / 置信度仍走**真实加载器**，
+    不改变任何夹取结果。`assets` 只做**并集补充**（保留现场已有准入币种，
+    只保证用例要用的那几个在列表里）。
+
+    返回还原函数，调用方在 `tearDownModule` 里执行。
+    """
+    gate_flags = ("R20_GATE_TESTNET", "R20_GATE_DEMO_EXECUTION", "R20_GATE_EXECUTION")
+    backup = {k: os.environ[k] for k in gate_flags if k in os.environ}
+    for flag in gate_flags:
+        os.environ.pop(flag, None)
+    # live 与 demo 两档都开：本模块的用例会按 `adapter.environment` 选档（
+    # `require_execution` 按档查旗标），适配器全是桩，不存在真实下单面。
+    os.environ["R20_GATE_EXECUTION"] = "1"
+    os.environ["R20_GATE_DEMO_EXECUTION"] = "1"
+
+    # ⚠️ 钉**数据源**（`routing_policy.load_venue_pool`）而不是路由器上的薄包装
+    # `_load_venue_pool_soft`：本仓有用例为了验「常量模块缺失」而 `importlib.reload`
+    # 执行路由器，reload 会把模块顶层名字整体重绑 —— 钉在路由器上的补丁会被静默
+    # 冲掉（实测：单跑绿、整模块跑红）。`_load_venue_pool_soft` 内部是**调用时**
+    # `from ... import load_venue_pool`，所以钉数据源对 reload 免疫。
+    from r20_backend.exchanges import routing_policy as _routing
+    real_pool = _routing.load_venue_pool
+
+    def _permissive_pool(venue):
+        pool = dict(real_pool(venue))
+        pool["dry_run"] = False
+        pool["assets"] = list(dict.fromkeys(
+            [*(pool.get("assets") or []), *(a.upper() for a in assets)]))
+        return pool
+
+    pool_patch = patch.object(_routing, "load_venue_pool", _permissive_pool)
+    pool_patch.start()
+
+    def restore():
+        pool_patch.stop()
+        for flag in gate_flags:
+            os.environ.pop(flag, None)
+        os.environ.update(backup)
+
+    return restore
+
+
 def isolate_config(test):
     temp = tempfile.TemporaryDirectory(prefix='r20-test-config-')
     test.addCleanup(temp.cleanup)

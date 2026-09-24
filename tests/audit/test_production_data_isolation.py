@@ -581,7 +581,15 @@ class ProductionReservationDbPollutionTest(unittest.TestCase):
         return [(r[0], r[1], r[2]) for r in rows
                 if not cls._REAL_ENV.fullmatch(str(r[2] or ""))]
 
+    def _require_subprocess_ok(self):
+        # 本类的判据是「在**测试进程之外**只读地查生产库」（进程内 sqlite 闸会拦下
+        # 任何指向生产目录的连接），而离线护栏的**本职**就是拦子进程 ⇒ 离线套件下
+        # 本类"测不了"而非"测不过"，按仓内约定如实跳过。
+        from tests.config_sandbox import skip_if_offline_suite
+        skip_if_offline_suite(self, "判据需要只读子进程查询生产库，离线护栏按约定拦子进程")
+
     def test_detector_flags_a_mock_environment(self):
+        self._require_subprocess_ok()
         """自检 + 负例：夹具写法（MagicMock repr）必须被判为污染。"""
         import sqlite3
         import tempfile
@@ -601,6 +609,7 @@ class ProductionReservationDbPollutionTest(unittest.TestCase):
                          "检测器没抓到夹具污染（或误报真实环境名）")
 
     def test_production_db_has_no_unregistered_pollution(self):
+        self._require_subprocess_ok()
         db = ROOT / "data" / "risk_reservation.db"
         if not db.exists():
             self.skipTest("生产预留库不存在（全新环境）")

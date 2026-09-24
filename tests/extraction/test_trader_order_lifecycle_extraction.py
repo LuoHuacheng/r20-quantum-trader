@@ -333,7 +333,14 @@ class UnreadableIntentsFailClosedTest(unittest.TestCase):
             open_orders=lambda: [{"inst_id": "BTCUSDT", "order_id": "b1", "side": "buy",
                                   "size": 1.0, "status": "NEW"}],
             cancel_order=lambda *a, **k: calls.append(a))
-        with patch.object(aft, "load_open_intents", _boom), \
+        # ⚠️ OKX 侧也必须钉成桩：本用例验的是「外所回收读到意图失败 ⇒ 不撤单」，
+        # 而 `clean_stale_open_orders` **第一件事**就是 `okx_rest.pending_orders()`。
+        # 不钉它就会去真连 OKX：联网环境下拿到的是账户实况（与断言无关的另一种失败），
+        # 离线套件下直接被护栏拦成网络异常 —— 两种都会把这条用例染红得与其意图无关。
+        okx = types.SimpleNamespace(pending_orders=lambda: [],
+                                    cancel_order=lambda *a, **k: calls.append(a))
+        with patch.object(aft, "okx_rest", okx), \
+             patch.object(aft, "load_open_intents", _boom), \
              patch.object(aft, "current_environment",
                           lambda: types.SimpleNamespace(mode="demo")), \
              patch.object(aft.venue_registry, "execution_open", lambda v, e: v == "binance"), \

@@ -72,10 +72,16 @@ class _Sandbox(unittest.TestCase):
     def _stage_syspath_cleanup(self):
         """副本会在自己的模块头部把 `_ROOT` / `_PROJECT_ROOT` / `_THIS_DIR` 塞进
         `sys.path`（实测泄漏的是 `<tmp>/scripts` 这个**子目录**，不是临时根）
-        ⇒ 三个都登记摘除。"""
+        ⇒ 三个都登记摘除。
+
+        ⚠️ 摘除必须**容忍不存在**：`runpy.run_path` 只在执行期间临时占用
+        `sys.path[0]`（脚本所在目录），跑完就还原 —— 副本自身的 bootstrap 只插
+        `_ROOT`，`<tmp>/scripts` 从未真正落进 `sys.path`。旧写法在这里无条件
+        `remove` ⇒ 每条用例都多一个 `ValueError` 冤案（清理是卫生，不是断言）。
+        """
         for entry in (str(self.root), str(self.root / "scripts")):
             if entry not in sys.path:
-                self.addCleanup(sys.path.remove, entry)
+                self.addCleanup(lambda e=entry: sys.path.remove(e) if e in sys.path else None)
 
     def _write_cb(self, payload):
         Path(self.cb).write_text(json.dumps(payload), encoding="utf-8")

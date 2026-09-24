@@ -443,7 +443,10 @@ class StaticAssetTests(_Base):
         real.write_text("<html>legacy</html>", encoding="utf-8")
         out = A.admin_page(subpath="legacy.html")
         self.assertIsInstance(out, FileResponse)
-        self.assertEqual(out.path, str(real))
+        # 两侧 resolve 后比较：`admin_page` 为做路径逃逸校验对候选路径调了
+        # `.resolve()`（macOS 上 TMPDIR 是 `/var/...`、resolve 后是 `/private/var/...`），
+        # 这是同一条路径的两种写法，不是路径漂移。
+        self.assertEqual(Path(out.path).resolve(), real.resolve())
         self.assertEqual(out.headers["cache-control"], "no-cache")
         self.spa.assert_not_called()
 

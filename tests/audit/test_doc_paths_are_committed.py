@@ -78,6 +78,10 @@ class DocPathsAreCommittedTest(unittest.TestCase):
 
     def test_gate_has_teeth(self):
         """有牙齿自检：造一个真实存在但未跟踪的文件，必须被判为未跟踪。"""
+        # 判据走 `git ls-files` 子进程；离线护栏按约定拦子进程 ⇒ 如实跳过
+        # （被测的规矩本身由同类里的全树扫描钉住，不依赖子进程）。
+        from tests.config_sandbox import skip_if_offline_suite
+        skip_if_offline_suite(self, "判据需要 git 子进程，离线护栏按约定拦子进程")
         import tempfile
         with tempfile.TemporaryDirectory(dir=str(ROOT), prefix=".untracked-probe-") as td:
             probe = Path(td) / "probe_gate.py"
@@ -147,6 +151,8 @@ class BroadDocReferencesTest(unittest.TestCase):
 
     def test_broad_check_has_teeth(self):
         """牙齿：源码树里造一个未跟踪文件，宽扫描必须报出来。"""
+        from tests.config_sandbox import skip_if_offline_suite
+        skip_if_offline_suite(self, "判据需要 git 子进程，离线护栏按约定拦子进程")
         import tempfile
         with tempfile.TemporaryDirectory(dir=str(ROOT / "tests"), prefix=".untracked-wide-") as td:
             probe = Path(td) / "probe.py"

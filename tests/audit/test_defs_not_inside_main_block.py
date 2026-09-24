@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,13 @@ class DefsNotInsideMainBlockTest(unittest.TestCase):
 
     def test_nested_tests_really_are_not_collected(self):
         """牙齿：块内用例**真的**收集不到（不是洁癖），正常缩进的能收集到。"""
+        # 本门拿 pytest 的**收集行为本身**当判据，而 pytest 并不在本仓依赖清单里
+        # （见 `test_dependency_manifest_unchanged`）—— 本仓的判绿口径是
+        # `unittest discover`。没装 pytest 的机器只能如愿跳过：跳过的是「牙齿自检」，
+        # **不是**那条规矩 —— 规矩由 `test_no_defs_inside_main_block` 全树 AST 扫描
+        # 钉住，不依赖 pytest。
+        if importlib.util.find_spec("pytest") is None:
+            self.skipTest("未安装 pytest（非本仓依赖），无法复现「块内用例收集不到」的收集行为")
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             (d / "test_hidden.py").write_text(textwrap.dedent('''

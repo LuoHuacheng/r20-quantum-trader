@@ -433,6 +433,11 @@ class AuxiliaryReadTests(_Sandbox, unittest.TestCase):
 
     def test_the_log_tail_is_read_when_present(self):
         # ★ 第 277–281 行
+        # 生产实现是 `subprocess.run("tail -n 60 <LOG_FILE>")`（sync_web_data.py 第 278 行），
+        # 而离线护栏的**本职**就是拦子进程 ⇒ 离线套件下本用例"测不了"而非"测不过"，
+        # 按仓内约定如实跳过（见 tests/config_sandbox.skip_if_offline_suite）。
+        from tests.config_sandbox import skip_if_offline_suite
+        skip_if_offline_suite(self, "被测行为走 `tail` 子进程，离线护栏按约定拦子进程")
         (self.logs / "trading.log").write_text(
             "\n".join(f"line{i}" for i in range(80)), encoding="utf-8")
         out = self._run(balances=[])
@@ -480,9 +485,11 @@ class MainGuardTests(_Sandbox, unittest.TestCase):
         copy.write_text(Path(swd.__file__).read_text(encoding="utf-8"), encoding="utf-8")
         # 副本会在模块头部把 `_ROOT` / `_PROJECT_ROOT` / `_THIS_DIR` 塞进 sys.path
         # （实测泄漏的是 `<tmp>/scripts` 这个**子目录**）⇒ 两个都登记摘除。
+        # ⚠️ 摘除容忍不存在：`runpy.run_path` 仅在执行期间临时占用 `sys.path[0]`，
+        # 跑完就还原，副本的 bootstrap 只插 `_ROOT` —— 无条件 remove 会造冤案。
         for entry in (str(self.root), str(self.root / "scripts")):
             if entry not in sys.path:
-                self.addCleanup(sys.path.remove, entry)
+                self.addCleanup(lambda e=entry: sys.path.remove(e) if e in sys.path else None)
         with patch.object(swd.okx_runtime, "current_environment",
                           lambda: self._env(configured=False)), \
              patch("urllib.request.urlopen", side_effect=OSError("no net")):

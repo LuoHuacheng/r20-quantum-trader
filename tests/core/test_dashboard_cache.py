@@ -20,6 +20,7 @@
 
 import asyncio
 import json
+import os
 import sys
 import types
 import unittest
@@ -48,7 +49,10 @@ class _Base(unittest.TestCase):
 
 class ConstantTests(unittest.TestCase):
     def test_directories_are_anchored_at_the_repo_root(self):
-        self.assertTrue(DC.BASE_DIR.endswith("r20"))
+        # 判据是「锚在仓库根」而不是「目录名叫 r20」：检出目录叫什么与这条不变量无关，
+        # 拿目录名字面量当判据换个仓库名就假红（实测本仓检出为 `r20-quantum-trader`）。
+        self.assertEqual(DC.BASE_DIR, os.path.dirname(os.path.dirname(
+            os.path.abspath(DC.__file__))))
         self.assertEqual(DC.DASHBOARD_DIR, DC.BASE_DIR + "/r20_backend")
         self.assertEqual(DC.WORKSPACE_DIR, DC.BASE_DIR)
         self.assertEqual(DC.DATA_DIR, DC.BASE_DIR + "/data")

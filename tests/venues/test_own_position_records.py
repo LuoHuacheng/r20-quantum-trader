@@ -28,6 +28,27 @@
 """
 from __future__ import annotations
 
+# ── ambient 隔离（执行闸 + 所池）─────────────────────────────────────────
+# 见 `tests/config_sandbox.isolate_router_execution`：宿主 `.env` 的
+# `R20_GATE_*` 与 `data/venue_routing.json` 的现场池（gate 是 `dry_run=true` +
+# 空 `assets`）会把本模块的用例全部卡在 `require_execution` / `venue_dry_run`，
+# 到不了它们要验的那一步。本模块只验路由语义，故把这两处钉成隔离态。
+_RESTORE_ISOLATION = None
+
+
+def setUpModule():
+    global _RESTORE_ISOLATION
+    from tests.config_sandbox import isolate_router_execution
+    _RESTORE_ISOLATION = isolate_router_execution()
+
+
+def tearDownModule():
+    global _RESTORE_ISOLATION
+    if _RESTORE_ISOLATION:
+        _RESTORE_ISOLATION()
+        _RESTORE_ISOLATION = None
+
+
 import json
 import os
 import sys

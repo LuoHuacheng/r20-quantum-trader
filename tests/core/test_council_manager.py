@@ -162,14 +162,23 @@ class AtomicWriteTests(_Base):
         CM._atomic_write_json(self.tmp / "x.json", {})
         self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["x.json"])
 
-    def test_failure_leaves_a_temp_file_behind(self):
-        """⚠️ 实测观察：本辅助**没有** `finally: unlink`（其余 6 个原子写辅助都有），
-        `os.replace` 失败时会残留一个 `tmp*` 临时文件。按实际行为钉住，未擅自改。"""
+    def test_failure_cleans_up_the_temp_file(self):
+        """失败路径**必须**收掉临时件（本仓其余原子写辅助都这么做，此处曾是漏网）。
+
+        旧写法是 `NamedTemporaryFile(delete=False)` 且**没有任何清理**，`os.replace`
+        失败就残留一个 `tmp*`（旧用例把这个行为"按实际钉住"了，等于把缺陷写成契约）。
+        实测现场一小时内堆下 51 个这样的孤儿（完整 JSON、共 513 KB），而
+        `data/council_config.json` 两天没更新 —— 写没落盘、垃圾留下了，两种都很静默。
+        """
+        target = self.tmp / "x.json"
+        target.write_text('{"old": true}', encoding="utf-8")
         with mock.patch.object(CM.os, "replace", side_effect=OSError("磁盘满了")):
             with self.assertRaises(OSError):
-                CM._atomic_write_json(self.tmp / "x.json", {})
-        leftovers = list(self.tmp.glob("tmp*"))
-        self.assertEqual(len(leftovers), 1, "确实残留了一个临时文件")
+                CM._atomic_write_json(target, {"new": 1})
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["x.json"],
+                         "失败必须一个临时件都不留")
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"old": True},
+                         "失败必须原样保全旧文件")
 
 
 class LoadConfigTests(_Base):

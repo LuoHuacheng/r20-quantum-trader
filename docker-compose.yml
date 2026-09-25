@@ -16,6 +16,10 @@ services:
     command: ["backend"]
     ports:
       - "8080:8080"
+    # 容器内访问宿主机上的本地 LLM 供应商（如 127.0.0.1:3123）
+    # Linux 需 host-gateway；macOS/Windows Docker Desktop 自带解析
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1

@@ -16,14 +16,16 @@ services:
     command: ["backend"]
     ports:
       - "8080:8080"
-    # 容器内访问宿主机上的本地 LLM 供应商（如 127.0.0.1:3123）
-    # Linux 需 host-gateway；macOS/Windows Docker Desktop 自带解析
+    # 容器内访问宿主机上的本地 LLM 供应商（如 127.0.0.1:3123）：
+    # 容器里的 127.0.0.1 是容器自身，必须经 host.docker.internal 出网。
+    # Linux 需 host-gateway；macOS/Windows Docker Desktop 自带解析。
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
+      - R20_STANDALONE_GATEWAY=true
     volumes:
       # 挂载私密配置（读写挂载：支持管理后台直接修改并持久化配置变更）
       - ./.env:/app/.env
@@ -37,3 +39,28 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # ----------------------------------------------------------------------------
+  # 2. 量化网关与调度核心：15分钟波段扫描、因子刷新、AI 投委会与硬风控执行
+  # ----------------------------------------------------------------------------
+  gateway:
+    image: r20-quantum-trader:latest
+    container_name: r20-gateway
+    restart: unless-stopped
+    command: ["gateway"]
+    # 调度器独立成容器后，LLM 调用路径随之一并搬到这里 ——
+    # backend 那份 extra_hosts 覆盖不到本容器，必须各自声明。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+    volumes:
+      - ./.env:/app/.env
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backups:/app/backups
+    depends_on:
+      backend:
+        condition: service_healthy

@@ -5,15 +5,18 @@ LLM 请求 → 决策归一 → 缓存/历史/持仓指令三份落盘 → 周�
 它的全部 37 个自由名都是 kw-only 入参（门面调用期解析），所以本刀全部走注入，
 不碰任何真实网络或磁盘。
 
-## 本刀最重要的产出：一个**真实生产缺陷**
+## 本刀曾经的重要产出（已于 2026-09-25 修复）
 
-详见 `CouncilSuccessPathBugTests` —— 投委会**开启且辩论成功**时，`content` 变量从未被赋值，
+原名 `CouncilSuccessPathBugTests` —— 投委会**开启且辩论成功**时，`content` 变量从未被赋值，
 而第 230 行要用 `len(content)`，于是 `UnboundLocalError` 被外层 `except` 吞掉：
 
   ⇒ 决策**确实写盘了**，但函数**返回 `None`**、周期健康被记成 **`failed`**、成功日志不打印。
 
-按本战役纪律：**只记录、不擅自修**（改它会改实盘行为）。已用 `assertRaises` 的反面钉法
-把现状锁住，避免后人以为这条路径"是好的"。
+上游当时按战役纪律**只记录、不擅自修**（改它会改实盘行为），用 `assertRaises` 的反面钉法
+把现状锁住。2026-09-25 实盘代价兑现：管理员打开投委会后**每一轮**都被记成 failed，
+`cycle_stages` 据此判「禁止复用旧持仓指令」⇒ 连续多轮不下单（表面上是「一直空仓」）。
+故本批修掉根因（`dispatch.py` 在 `try` 顶部初始化 `content = ""`），
+并把本类从「钉住 bug」改为「钉住已修 + 防回归」。
 """
 from __future__ import annotations
 
@@ -490,21 +493,15 @@ class HealthAndReturnTests(_Harness, unittest.TestCase):
         self.assertEqual(self.health[0][0], "failed")
 
 
-class CouncilSuccessPathBugTests(_Harness, unittest.TestCase):
-    """★★ 本刀实测到的**真实生产缺陷**（只记录，未改）。
+class CouncilSuccessPathTests(_Harness, unittest.TestCase):
+    """投委会**开启且辩论成功**时，批次决策必须正常返回并记成健康周期。
 
-    投委会**开启且辩论成功**时，`brain_output` 由委员会给出，
-    于是 `if brain_output is None:` 那段（**唯一**给 `content` 赋值的地方）被跳过；
-    而第 230 行要 `output_chars=len(content)` ⇒ `UnboundLocalError`。
-
-    后果链条（三条都已实测）：
-
-    1. 决策缓存 / 持仓指令 / 历史 **确实写盘了**（它们在第 230 行之前完成）；
-    2. 但函数 **`return None`** —— 调用方拿到的是失败信号；
-    3. `_record_cycle_health("failed", ...)` ⇒ **成功的周期被记成失败**。
-
-    即：**开启投委会会让每一轮都被记成 failed**（而投委会本身是可用功能）。
-    修它属于改实盘行为，按本战役纪律只钉现状、留给单独决策。
+    历史（上游 `25acd81` 只记录未修）：`content` 只在 `if brain_output is None:`
+    内被绑定，而末尾 `output_chars=len(content)` 在外层 ⇒ 投委会成功路径必抛
+    UnboundLocalError，被 `except` 吞成 `return None` + 周期记 failed。
+    后果不是“少一条日志”：决策三份落盘都已完成，调用方却拿到失败信号，
+    `cycle_stages` 据此判「本轮AI推理失败，禁止复用旧持仓指令」⇒ **整批不下单**。
+    2026-09-25 修：`dispatch.py` 在 `try` 顶部初始化 `content = ""`。
     """
 
     def _enable_council(self):
@@ -514,20 +511,20 @@ class CouncilSuccessPathBugTests(_Harness, unittest.TestCase):
                                {"total_duration_ms": 42, "consensus_mode": "unanimous",
                                 "advisors": {"a": {"status": "ok"}}})
 
-    def test_council_success_returns_none_instead_of_the_cache(self):
+    def test_council_success_returns_the_cache(self):
         self._enable_council()
-        self.assertIsNone(self._run())
+        self.assertIn("assembled", self._run())
 
-    def test_council_success_is_recorded_as_a_failed_cycle(self):
+    def test_council_success_is_recorded_as_a_healthy_cycle(self):
         self._enable_council()
         self._run()
-        self.assertEqual(self.health[0][0], "failed")
-        self.assertIn("content", self.health[0][1])
-        self.assertEqual(self.telemetry.calls[0][0], ("failed",))
-        self.assertIsInstance(self.telemetry.calls[0][1]["error"], UnboundLocalError)
+        self.assertEqual(self.health, [("ok",)])
+        self.assertEqual(self.telemetry.calls[0][0][0], "success")
+        # 投委会路径不经过单模型分支 ⇒ 无正文可计（委员会自己的调用另行记账）
+        self.assertEqual(self.telemetry.calls[0][1]["output_chars"], 0)
 
-    def test_the_cache_and_history_still_land_despite_the_crash(self):
-        # 三份落盘都发生在第 230 行之前 ⇒ 副作用已产生，只有**返回值与健康记录**是错的
+    def test_the_cache_and_history_still_land(self):
+        # 三份落盘都发生在末尾遥测之前 ⇒ 修复前后都落盘；这里钉住不被后续改动破坏
         self._enable_council()
         self._run()
         self.assertIn(self.paths["cache"], self.written)
@@ -535,26 +532,22 @@ class CouncilSuccessPathBugTests(_Harness, unittest.TestCase):
         self.assertIn(self.paths["history"], self.written)
 
     def test_the_single_model_path_is_unaffected(self):
-        # 对照组：投委会关闭时 `content` 有值 ⇒ 同一份夹具下返回缓存、健康记 ok
+        # 对照组：投委会关闭时走单模型分支，同一份夹具下返回缓存、健康记 ok
         self.council_cfg = {"enabled": False}
         out = self._run()
         self.assertIn("assembled", out)
         self.assertEqual(self.health, [("ok",)])
 
-    def test_the_crash_is_purely_the_missing_content_binding(self):
-        # 反证：源码里 `content` 的**每一处赋值都只在单模型分支之内**，
-        # 而使用点在外层 —— 这就是根因（不是委员会结果本身有什么问题）
-        src = Path(dispatch.__file__).read_text(encoding="utf-8")
-        self.assertIn("output_chars=len(content)", src)
-        assign_lines = [i + 1 for i, line in enumerate(src.splitlines())
-                        if line.strip().startswith(("content =", "content,", "content.startswith"))]
-        self.assertTrue(assign_lines, "应能找到 content 的绑定点")
-        guard = next(i + 1 for i, line in enumerate(src.splitlines())
-                     if "if brain_output is None:" in line)
-        use = next(i + 1 for i, line in enumerate(src.splitlines())
-                   if "output_chars=len(content)" in line)
-        self.assertTrue(all(guard < ln < use for ln in assign_lines),
-                        f"content 的绑定点 {assign_lines} 应全部落在守卫 {guard} 与使用点 {use} 之间")
+    def test_content_is_initialised_before_the_single_model_guard(self):
+        # 防回归（源码扫描）：`content` 必须有一处初始化落在 `if brain_output is None:`
+        # **之前** —— 末尾 `output_chars=len(content)` 在外层，缺了它投委会成功路径
+        # 就重演 UnboundLocalError，而异常被 `except` 吞掉后只表现为“一直不下单”。
+        src = Path(dispatch.__file__).read_text(encoding="utf-8").splitlines()
+        guard = next(i for i, line in enumerate(src) if "if brain_output is None:" in line)
+        # 使用点取**守卫之后**的第一处：注释里也可能提到这个表达式（本批就踩过）
+        use = next(i for i in range(guard, len(src)) if "output_chars=len(content)" in src[i])
+        before = [line.strip() for line in src[:guard] if line.strip().startswith("content =")]
+        self.assertTrue(before, f"守卫（第 {guard + 1} 行）之前必须有 content 初始化")
         self.assertLess(guard, use)
 
 

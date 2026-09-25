@@ -68,6 +68,12 @@ def dispatch_llm_and_persist_decisions(*,
         t0 = time.time()
         raw_res = None
         brain_output = None
+        # 投委会成功时 `brain_output` 非 None ⇒ 下方「单模型」块整段跳过，那里才是
+        # `content` 的**唯一**绑定点；而本函数末尾的遥测要按它的长度计 output_chars。
+        # 不在此处初始化 ⇒ 投委会每成功一轮就 UnboundLocalError（被下面 `except`
+        # 吞成 return None）：决策已三份落盘，调用方却拿到失败信号，
+        # cycle_stages 据此判「本轮AI推理失败，禁止复用旧持仓指令」⇒ 整批不下单。
+        content = ""
 
         # Transparent check: is Multi-Agent Council enabled?
         council_enabled = False

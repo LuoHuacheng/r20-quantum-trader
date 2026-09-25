@@ -10,17 +10,27 @@ r"""brain 派发尾块抽取对拍门（B3·第九十八刀）。
 在同一个函数里被赋过值的局部量。
 
 为什么必须单独钉：本刀首版把 `content` 当成了门面全局（真因是我的抽取分析器用
-`ast.walk`（**BFS，非源码序**）判断"首个 Store/Load"，于是段内解包目标
-`content, _, usage_dict, _ = execute_llm_request(...)` 被判成"晚于"它后面的 Load）。
+`ast.walk`（**BFS，非源码序**）判断“首个 Store/Load”，于是段内解包目标
+`content, _, usage_dict, _ = execute_llm_request(...)` 被判成“晚于”它后面的 Load）。
 结果调用点写成 `content=content` —— **门面里没有这个名字 ⇒ 潜伏 NameError**，
-而"签名/调用点一致性"与"段体 AST 逐字"两条判据**都看不见**它。
+而“签名/调用点一致性”与“段体 AST 逐字”两条判据**都看不见**它。
+
+## 2026-09-25：段体一次**有意**修改 + 基线改录制式
+
+上条 NameError 是“搬动时就错”，本轮是“搬完之后发现真 bug”：`content` 只在
+`if brain_output is None:` 内被绑定，而末尾遥测要按它的长度计量 ⇒ 投委会成功
+路径必抛 `UnboundLocalError`，被 `except` 吞成 `return None`（决策已落盘，
+调用方却拿到失败信号 ⇒ 整批不下单）。修法是在 `try` 顶部初始化 `content = ""`。
+
+于是“与搬运前逐字相同”这条一次性基线**永远不可能再成立**，按本仓既有先例
+（`tests/extraction/_verbatim_golden.py` 与 order_lifecycle / cloud_protection 两门）
+改为**录制式黄金快照**：有意修改 → 重录并随提交留下 diff；意外丢行/形状变了 → 立刻红。
 """
 from __future__ import annotations
 
 import ast
 import builtins
 import inspect
-import subprocess
 import sys
 import types
 import unittest
@@ -29,20 +39,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-PRE = "0a05d76"                       # 本刀动工前最后提交（第九十七刀收口）
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # 同级黄金快照工具
+from _verbatim_golden import load as _golden_load, record_mode as _golden_recording, save as _golden_save  # noqa: E402
+
+GOLDEN_NAME = "brain_dispatch"
 FACADE = ROOT / "scripts" / "ai_brain_trader.py"
 MOD = ROOT / "scripts" / "brain" / "dispatch.py"
 FN = "dispatch_llm_and_persist_decisions"
-SEG = 35                              # 基线 execute_batch_ai_brain_cycle 的语句下标
 OWNER = "execute_batch_ai_brain_cycle"
 
 
-def _baseline_fn() -> ast.FunctionDef:
-    r = subprocess.run(["git", "show", f"{PRE}:scripts/ai_brain_trader.py"],
-                       capture_output=True, text=True, cwd=str(ROOT))
-    assert r.returncode == 0, f"基线取不到：{r.stderr[:200]}"
-    t = ast.parse(r.stdout)
-    return next(n for n in t.body if isinstance(n, ast.FunctionDef) and n.name == OWNER)
+def _dump(body) -> str:
+    return ast.dump(ast.Module(body=list(body), type_ignores=[]), include_attributes=False)
+
+
+def _segment_body() -> list:
+    """当前段体，去掉函数开头的 docstring（与旧判据同一归一）。"""
+    body = list(_impl().body)
+    if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    return body
 
 
 def _impl() -> ast.FunctionDef:
@@ -59,16 +76,24 @@ def _facade_call() -> tuple:
 
 
 class BrainDispatchVerbatimTest(unittest.TestCase):
-    def test_segment_is_ast_identical_to_baseline(self):
-        seg = _baseline_fn().body[SEG]
-        body = list(_impl().body)
-        if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)):
-            body = body[1:]
-        self.assertEqual(
-            ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False),
-            ast.dump(ast.Module(body=[seg], type_ignores=[]), include_attributes=False),
-            "派发尾块段体与抽取前**不再同一棵 AST**")
+    def test_moved_segment_matches_recorded_baseline(self):
+        """段体与**录制基线**同一实现（原为 `git show 0a05d76` 的一次性基线）。
+
+        「与搬运前逐字相同」在段体被**有意**修改后永远不可能再成立（本批的
+        `content` 修复就是这种修改），持续变红只会淹没真实回归。
+        语义改为录制式快照：有意修改 → `R20_RECORD_EXTRACTION_GOLDENS=1` 重录并
+        随提交一并交 golden；意外丢行 / 闭包被外提 / 壳注入形状变了 → 立刻红。
+        """
+        current = {"args": [a.arg for a in _impl().args.kwonlyargs],
+                   "body": _dump(_segment_body())}
+        if _golden_recording():
+            _golden_save(GOLDEN_NAME, current)
+            self.skipTest(f"已重录 {GOLDEN_NAME} 黄金快照")
+        gold = _golden_load(GOLDEN_NAME)
+        self.assertEqual(gold["args"], current["args"],
+                         "段体形参表变了 —— 抽取注入形状被改动")
+        self.assertEqual(gold["body"], current["body"],
+                         "派发尾块段体与录制基线**不再是同一实现**")
 
     def test_call_passes_every_parameter_once_same_name(self):
         params = [a.arg for a in _impl().args.kwonlyargs]
@@ -173,10 +198,10 @@ class BrainDispatchVerbatimTest(unittest.TestCase):
         self.assertIsNone(got)
 
     def test_judgment_actually_notices_a_change(self):
-        seg = _baseline_fn().body[SEG]
+        # 自检：判据看不见语句增减
         self.assertNotEqual(
-            ast.dump(ast.Module(body=[seg, ast.Pass()], type_ignores=[]), include_attributes=False),
-            ast.dump(ast.Module(body=[seg], type_ignores=[]), include_attributes=False),
+            _dump([*_segment_body(), ast.Pass()]),
+            _dump(_segment_body()),
             "自检：判据看不见语句增减")
 
 

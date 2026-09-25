@@ -368,10 +368,12 @@ class AiFactorTraderPositionProtectionTest(unittest.TestCase):
         self.assertEqual(method, 'POST')
         # 第一百六十六刀（用户拍板 mark）：云端棘轮腿显式带触发价类型，
         # 与入场附着腿同口径（旧断言无这两个字段）
+        # v8.3.1（上游 73841f2）：OCO 默认带券商归因 tag，断言钉「与 okx_rest 默认口径一致」而不重抄字面量。
         self.assertEqual(body, dict(instId='SOL-USDT-SWAP', side='sell', sz='4', posSide='long',
             tdMode='cross', ordType='oco', tpTriggerPx='106', slTriggerPx='101', tpOrdPx='-1',
             slOrdPx='-1', tpTriggerPxType='mark', slTriggerPxType='mark',
-            reduceOnly=True, cxlOnClosePos=True))
+            reduceOnly=True, cxlOnClosePos=True,
+            tag=ai_factor_trader.okx_rest.DEFAULT_OKX_BROKER_TAG))
         self.assertEqual(len(self.http.calls('/api/v5/trade/orders-algo-pending')), 2)
 
     def test_stale_order_query_failure_aborts_cleanup(self):

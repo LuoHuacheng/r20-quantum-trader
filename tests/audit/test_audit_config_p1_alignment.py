@@ -259,26 +259,47 @@ class PipelineMergeNoDoublingTests(_SandboxBase):
                             f"{key} 渲染后长度异常膨胀（base 被重复前置）")
         return after
 
+    def _assert_no_source_downgrade(self, profile):
+        """方案无关的标签完整性守卫（P1-2 根契约）。
+
+        「标题与内容逐字等于某段代码基座的模块，必须带 source='base'」——
+        判定与 `_clean_pipelines` 的兜底同源（`align_pipeline_sources`），
+        基座文本日后被改也不会让断言漂移。
+
+        只在流水线**本来就有**基座模块时有内容可查；只挂 custom 模块的方案
+        （如 wide_oscillation 的 trading_system）自然空转——base 段由
+        `apply_module_layout` 另行前置，不靠流水线里的标签。
+        """
+        for key in self.pl.TEMPLATE_KEYS:
+            modules = profile["pipelines"].get(key) or []
+            for got, want in zip(modules, self.pl.align_pipeline_sources(modules, key)):
+                self.assertEqual(
+                    got.get("source"), want.get("source"),
+                    f"{key}/{got.get('id')} 来源标签被降级（应为 {want.get('source')}，"
+                    f"实际 {got.get('source')}）→ 下次布局会把基座段重复前置，提示词翻倍（P1-2）")
+
     def test_evolution_page_shape_does_not_downgrade_other_pipelines(self):
         profile = self.pl.active_profile()
-        after = self._assert_unchanged_after({"pipelines": self._shape_evolution(profile)})
-        for key in ("trading_system", "trading_user", "evolution_user"):
-            self.assertIn("base", after[key][0], f"{key} 的 base 标签被降级成 legacy → 下次布局会翻倍")
+        self._assert_unchanged_after({"pipelines": self._shape_evolution(profile)})
+        self._assert_no_source_downgrade(self.pl.active_profile())
 
     def test_studio_shape_keeps_base_tags_and_does_not_double(self):
         profile = self.pl.active_profile()
-        after = self._assert_unchanged_after({"pipelines": self._shape_studio(profile)})
-        self.assertIn("base", after["trading_system"][0])
-        self.assertIn("base", after["evolution_system"][0])
+        self._assert_unchanged_after({"pipelines": self._shape_studio(profile)})
+        self._assert_no_source_downgrade(self.pl.active_profile())
 
     def test_submitted_pipeline_without_source_inherits_stored_base_tag(self):
-        """API 客户端漏传 source 时，不能把 base 模块悄悄降级成 custom。"""
+        """API 客户端漏传 source 时，不能把已存的来源标签（尤其 base）悄悄降级成 custom。"""
         profile = self.pl.active_profile()
+        submitted = profile["pipelines"]["trading_system"]
         stripped = {"trading_system": [{k: m[k] for k in ("id", "title", "content", "enabled") if k in m}
-                                       for m in profile["pipelines"]["trading_system"]]}
+                                       for m in submitted]}
         profile_id = self.pl.load_library()["active_profile_id"]
         updated = self.pl.update_profile(profile_id, {"pipelines": stripped})
-        self.assertEqual(sorted({m["source"] for m in updated["pipelines"]["trading_system"]}), ["base"])
+        self.assertEqual(
+            {str(m.get("id")): m.get("source") for m in updated["pipelines"]["trading_system"]},
+            {str(m.get("id")): m.get("source") for m in submitted},
+            "漏传 source 的提交改写了已存标签：base 被降级后下次布局会把基座段重复前置（P1-2）")
 
     def test_clean_pipelines_keeps_stored_modules_for_unmentioned_pipeline(self):
         """_clean_pipelines 的兜底分支：已存定义在场时，未提到的管线不得被重建成 legacy。

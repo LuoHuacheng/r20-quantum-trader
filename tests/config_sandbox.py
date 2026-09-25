@@ -73,6 +73,27 @@ def isolate_router_execution(assets=("BTC", "ETH", "UNI")):
     return restore
 
 
+def live_prompt_library() -> dict:
+    """线上**活的**提示词方案库（只读）：经存储层读取，不假设落盘是单个 JSON 文件。
+
+    目录分文件存储（`data/prompt_profiles/`）后，`data/prompt_library.json` 只在迁移前
+    才是真源；直接 `read_text` 它 = 把「线上布局」核对退化成「核一份可能已冻结的旧快照」。
+    调用方必须先声明生产读（`from tests import allow_real_data_reads`）。
+    """
+    import scripts.prompt_library as prompts
+    real = Path(__file__).resolve().parents[1] / "data" / "prompt_library.json"
+    with patch.object(prompts, "LIBRARY_FILE", real):
+        return prompts.load_library()
+
+
+def live_prompt_profile(test, profile_id: str = "stable") -> dict:
+    """线上某方案的持久化原文；无快照（全新部署）时 `skipTest`。"""
+    profile = live_prompt_library()["profiles"].get(profile_id)
+    if not isinstance(profile, dict):
+        test.skipTest(f"无线上方案快照 {profile_id}（全新部署），跳过线上守卫")
+    return profile
+
+
 def isolate_config(test):
     temp = tempfile.TemporaryDirectory(prefix='r20-test-config-')
     test.addCleanup(temp.cleanup)

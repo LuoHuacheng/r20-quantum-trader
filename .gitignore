@@ -81,6 +81,14 @@ data/*.md
 data/.*secret_key
 data/credentials/
 data/policy_archives/
+# 提示词方案库是**运行时可变状态**（active 指针 + 用户编辑的方案 + 版本历史），不是发布物：
+# v8.3.0 实测「切换一次方案」就因全库重算写出 3 字段 diff，而它此前是**唯一**被例外跟踪的
+# `data/*.json`（跟踪文件不受 `data/*.json` 约束）。默认方案由代码 `PRESETS` 与策略归档链
+# 提供 ⇒ 彻底退出版本库（方案 C，见 docs/PROMPT_LIBRARY_STORAGE.md）。
+# ⚠️ 旧单文件若仍在磁盘上，只作**只读回落 / 回滚副本**保留（迁移不改写、不删除它）。
+data/prompt_library.json
+# 目录分文件存储（方案 B）：index.json + 一方案一文件，写粒度 = 单个方案。
+data/prompt_profiles/
 trading.html
 OPEN_SOURCE_CONTROL_TODO.md
 CONTROL_PLANE_V2_TODO.md

@@ -476,7 +476,9 @@ class HistoryAndRollbackTests(_Sandbox, unittest.TestCase):
         library["revisions"].append({"id": "rev-bad", "profile_id": self.pid,
                                      "action": "create", "note": "",
                                      "created_at": pl._now(), "snapshot": bad})
-        self._write(library)
+        # 经**存储层**落盘（`save_library`）：目录分文件存储下直接改写 LIBRARY_FILE
+        # 已经改不到活库（旧单文件只在迁移前才是真源）。快照原文不被规范化 ⇒ 注入仍生效。
+        pl.save_library(library)
         with self.assertRaises(ValueError) as ctx:
             pl.rollback_profile(self.pid, "rev-bad")
         self.assertIn("未知变量", str(ctx.exception))

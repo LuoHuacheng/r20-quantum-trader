@@ -77,8 +77,9 @@ class PromptUniversalityTests(unittest.TestCase):
         self.assertEqual(_offenders(block), [], "源码预设含绝对金额，小资金账户会冲突")
 
     def test_live_profile_has_no_absolute_money(self):
-        live = json.loads((ROOT / "data" / "prompt_library.json").read_text(encoding="utf-8"))
-        self.assertEqual(_offenders(json.dumps(live["profiles"]["stable"], ensure_ascii=False)), [],
+        from tests.config_sandbox import live_prompt_profile
+        live = live_prompt_profile(self)
+        self.assertEqual(_offenders(json.dumps(live, ensure_ascii=False)), [],
                          "线上方案缓存快照含绝对金额")
 
     def test_risk_budget_is_an_allowed_variable_and_rendered(self):
@@ -104,8 +105,8 @@ class PromptUniversalityTests(unittest.TestCase):
     def test_multiline_block_var_not_embedded_in_system_prose(self):
         """risk_budget 是多行块，内插进 system 正文会把句子撑断（曾在实盘 prompt 中出现）。
         约定：它只能作为独立小节出现在 trading_user，不得出现在 trading_system 文本里。"""
-        live = json.loads((ROOT / "data" / "prompt_library.json").read_text(encoding="utf-8"))
-        prof = live["profiles"]["stable"]
+        from tests.config_sandbox import live_prompt_profile
+        prof = live_prompt_profile(self)
         sys_blob = json.dumps(
             {"modules": (prof.get("pipelines") or {}).get("trading_system", []),
              "legacy": prof.get("trading_system")}, ensure_ascii=False)
@@ -129,8 +130,8 @@ class PromptUniversalityTests(unittest.TestCase):
         from scripts.ai_brain_trader import get_effective_system_prompt
         corpus = get_effective_system_prompt()
         corpus += (ROOT / "scripts" / "prompt_library.py").read_text(encoding="utf-8")
-        corpus += json.dumps(json.loads((ROOT / "data" / "prompt_library.json").read_text(encoding="utf-8"))
-                             ["profiles"]["stable"], ensure_ascii=False)
+        from tests.config_sandbox import live_prompt_profile
+        corpus += json.dumps(live_prompt_profile(self), ensure_ascii=False)
         for bad in ("六币种", "6币种", "在 6 个标的", "6 个标的中"):
             self.assertNotIn(bad, corpus, f"提示词写死了标的数量: {bad}")
 

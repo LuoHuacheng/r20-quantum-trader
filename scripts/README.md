@@ -73,7 +73,7 @@
 
 | 模块 | 行数 | 说明 |
 |---|---|---|
-| `prompt_library.py` | 1028 | 版本化提示词库（Python 交易侧直接使用） |
+| `prompt_library.py` | 1289 | 版本化提示词库（Python 交易侧直接使用）。存储两态：`data/prompt_profiles/`（一方案一文件，写盘时的真源）+ 旧单文件只读回落（见 `docs/PROMPT_LIBRARY_STORAGE.md`） |
 | `prompt_templates.py` | 193 | 提示词模板编译：文本 ⇄ 模块 ⇄ 管线布局 |
 | `llm_credentials.py` | 93 | LLM 客户端凭据解析单一事实源 |
 

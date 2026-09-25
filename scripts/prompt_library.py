@@ -57,6 +57,14 @@ except ImportError:  # scripts/ 在 sys.path
 
 ROOT = Path(__file__).resolve().parents[1]
 LIBRARY_FILE = ROOT / "data" / "prompt_library.json"
+#: 目录分文件存储（方案 B，见 docs/PROMPT_LIBRARY_STORAGE.md §7）：
+#: `<LIBRARY_FILE 同级的 prompt_profiles/>` 下 `index.json` + 一方案一文件。
+#: ⚠️ 目录从 `LIBRARY_FILE` **推导**而不是写成模块级常量 —— 测试普遍 patch `LIBRARY_FILE`，
+#: 写死常量会让存储落在真实 `data/` 里（本仓已有同型事故）。
+STORE_DIR_NAME = "prompt_profiles"
+STORE_VERSION = 3
+STORE_INDEX_NAME = "index.json"
+_STORE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 BJ_TZ = timezone(timedelta(hours=8))
 TEMPLATE_KEYS = ("trading_system", "trading_user", "evolution_system", "evolution_user")
 
@@ -416,6 +424,176 @@ def _default() -> dict[str, Any]:
     return {"version": 2, "active_profile_id": "stable", "profiles": {}, "revisions": []}
 
 
+def _disk_library_raw() -> dict[str, Any] | None:
+    """磁盘**原文**（不跑 `_migrate` / `_clean_profile`）。
+
+    存在的理由（方案 A，见 docs/PROMPT_LIBRARY_STORAGE.md）：`load_library` 会顺手把每个
+    方案的扁平文本按**当前代码基座**重算，于是「读 → 改指针 → 全库写回」会把与本次改动
+    无关的方案也一并改写（实测切换一次改掉 3 个字段，其中 stable 的两个文本 298 → 6490）。
+    需要「只动一个字段」的写路径必须能读到未经规范化的原文。
+    """
+    try:
+        raw = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _stored_profiles() -> dict[str, Any]:
+    """当前存储层里各方案的原文（键为 str(profile_id)）：目录存储优先，回落旧单文件。
+
+    用于「内容未变 → 沿用磁盘版本」判定（方案 A②）——拿到的必须是未经规范化的原文，
+    否则等值判定永远为假、写放大复活。
+    """
+    raw = _read_store() if _store_exists() else _disk_library_raw()
+    profiles = raw.get("profiles") if isinstance(raw, dict) else None
+    if not isinstance(profiles, dict):
+        return {}
+    return {str(k): v for k, v in profiles.items() if isinstance(v, dict)}
+
+
+def _unchanged_profile(pid: str, incoming: dict[str, Any], stored: Any) -> bool:
+    """本轮提交的方案与磁盘原文是否「内容未变」（方案 A②）。
+
+    对 `pipelines` 形态的方案，四类扁平文本是**派生缓存**（`resolve_profile` 读取时无条件
+    用 `compile_modules` 覆盖），故不参与判定 —— 否则代码基座一变，磁盘上的陈旧缓存就被
+    判成「已改动」，进而被整库重算写回（写放大与无关 diff 的另一半根因）。
+    """
+    if not isinstance(stored, dict) or str(stored.get("id") or "") != pid:
+        return False
+    if isinstance(incoming.get("pipelines"), dict):
+        drop = lambda item: {k: v for k, v in item.items() if k not in TEMPLATE_KEYS}
+        return drop(incoming) == drop(stored)
+    return incoming == stored
+
+
+def _json_file_equals(path: Path, payload: Any) -> bool:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) == payload
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def library_dir() -> Path:
+    """目录存储的根（方案 B）：`<LIBRARY_FILE 的父目录>/prompt_profiles`。"""
+    return LIBRARY_FILE.parent / STORE_DIR_NAME
+
+
+def store_index_file() -> Path:
+    return library_dir() / STORE_INDEX_NAME
+
+
+def _store_exists() -> bool:
+    return store_index_file().is_file()
+
+
+def _store_file_name(profile_id: str) -> str:
+    """方案文件的文件名（安全闸：方案 ID 会直接拼进路径）。
+
+    ID 来自方案库 JSON 的键（磁盘可被人工编辑），不做校验就是路径穿越面。
+    本仓已有同型的路由白名单（`^[a-zA-Z0-9_-]+$`），这里用同一根尺。
+    """
+    if not _STORE_ID_RE.match(str(profile_id)):
+        raise ValueError(f"方案 ID 含非法字符，不能作为存储文件名：{profile_id!r}")
+    return f"{profile_id}.json"
+
+
+def _read_store() -> dict[str, Any] | None:
+    """目录存储 → 内存整库（与旧单文件同形的 v2 payload）。索引缺失/损坏时返回 None。
+
+    读路径只做「合并」，不做「迁移」：目录不存在但旧单文件在时，**不写盘**地按旧文件读
+    （见 docs/PROMPT_LIBRARY_STORAGE.md §7 迁移策略的落地偏差说明）。
+    """
+    index = _disk_index_raw()
+    if index is None:
+        return None
+    profiles: dict[str, Any] = {}
+    revisions: list[dict[str, Any]] = []
+    for path in sorted(library_dir().glob("*.json")):
+        if path.name == STORE_INDEX_NAME: continue
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(doc, dict): continue
+        profile = doc.get("profile")
+        if isinstance(profile, dict):
+            profiles[str(profile.get("id") or path.stem)] = profile
+        if isinstance(doc.get("revisions"), list):
+            revisions.extend(item for item in doc["revisions"] if isinstance(item, dict))
+    # 分文件后全局顺序丢失：按 created_at 归并回时序（同刻保持文件内原序，稳定排序）
+    revisions.sort(key=lambda item: str(item.get("created_at") or ""))
+    return {"version": 2, "active_profile_id": str(index.get("active_profile_id") or "stable"),
+            "profiles": profiles, "revisions": revisions}
+
+
+def _disk_index_raw() -> dict[str, Any] | None:
+    try:
+        index = json.loads(store_index_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    return index if isinstance(index, dict) else None
+
+
+def _save_store(normalized: dict[str, Any]) -> None:
+    """把内存整库拆成「一方案一文件 + index」（方案 B）。
+
+    写粒度 = 单个方案：内容逐 JSON 相等的方案文件**不动**（写放大消失，单方案并发写互不
+    干扰）；索引最后写 ⇒ 中途崩溃只会留下旧指针 + 各自自洽的方案文件，不会指到不存在的方案。
+
+    `revisions` 随方案走（同文件）、写回时按 `profile_id` 归属，无主的孤儿历史不再落盘
+    （旧实现里孤儿会永久留存，见文档 §4）。
+
+    ⚠️ 天花板（写清免得被误读）：跨进程仍是**全局锁 + 整库 RMW**，最后一个写者的陈旧快照
+    仍可能覆盖**别的**方案（旧实现同型，B 并未解决）；这里拿到的是写粒度隔离（无关方案
+    零字节触碰 + 单文件损坏不波及其它方案）。要做真正的乐观并发，升级路径 = 给每方案加
+    基线版本（CAS，冲突则拒并提示重载）。
+    """
+    directory = library_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    by_profile: dict[str, list[Any]] = {}
+    for revision in normalized.get("revisions") or []:
+        if isinstance(revision, dict):
+            by_profile.setdefault(str(revision.get("profile_id") or ""), []).append(revision)
+    for pid, profile in (normalized.get("profiles") or {}).items():
+        doc = {"profile": profile, "revisions": by_profile.get(str(pid), [])[-MAX_REVISIONS:]}
+        path = directory / _store_file_name(pid)
+        if _json_file_equals(path, doc): continue
+        _atomic_write(path, doc)
+    # 已删方案的遗留文件必须清掉，否则下次 load 会“复活”它（旧实现对 revisions 的孤儿同型问题）
+    keep = {_store_file_name(pid) for pid in (normalized.get("profiles") or {})}
+    for path in directory.glob("*.json"):
+        if path.name == STORE_INDEX_NAME or path.name in keep: continue
+        path.unlink(missing_ok=True)
+    _atomic_write(store_index_file(), {"version": STORE_VERSION,
+                                       "active_profile_id": normalized["active_profile_id"],
+                                       "updated_at": _now()})
+
+
+def _set_active_profile_id(profile_id: str) -> bool:
+    """只改指针的轻量写（方案 A①）：读原文 → 改一个字段 → 原子写回。
+
+    不跑 `_migrate` / `_clean_profile` ⇒ 切换方案不再重写**其它**方案的任何字段：目录存储
+    下只动 `index.json` 一个字段（各方案文件一个字节不动），旧单文件布局下只有一行 diff。
+    返回 False 表示存储不是可轻写的形态（无文件 / 旧 v1 单方案文件），调用方须回落全库
+    规范化写路径 —— 那种情况下本来就得整库迁移。
+    """
+    index = _disk_index_raw()
+    if index is not None:
+        if index.get("active_profile_id") == profile_id: return True
+        index["active_profile_id"] = profile_id
+        _atomic_write(store_index_file(), index)
+        return True
+    raw = _disk_library_raw()
+    if raw is None or int(raw.get("version", 1)) < 2 or not isinstance(raw.get("profiles"), dict):
+        return False
+    if raw.get("active_profile_id") == profile_id:
+        return True
+    raw["active_profile_id"] = profile_id
+    _atomic_write(LIBRARY_FILE, raw)
+    return True
+
+
 def stable_base_module_id(title: str) -> str:
     """薄壳：转调 `scripts/prompt_templates.py`（结构优化阶段 4·B3 第五十三刀）。"""
     return _tpl_stable_base_module_id(title)
@@ -585,11 +763,15 @@ def _migrate(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_library() -> dict[str, Any]:
-    try:
-        raw = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
-        payload = _migrate(raw if isinstance(raw, dict) else {})
-    except (OSError, json.JSONDecodeError, ValueError):
-        payload = _default()
+    payload = _read_store()
+    if payload is None:
+        try:
+            raw = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+            payload = _migrate(raw if isinstance(raw, dict) else {})
+        except (OSError, json.JSONDecodeError, ValueError):
+            payload = _default()
+    else:
+        payload = _migrate(payload)
     active = str(payload.get("active_profile_id") or "stable")
     if active not in PRESETS and active not in payload["profiles"]:
         active = "stable"
@@ -651,7 +833,15 @@ def save_library(payload: dict[str, Any]) -> None:
         payload = existing
     normalized = _migrate(payload)
     normalized.pop("active_style", None); normalized.pop("custom", None)
-    _atomic_write(LIBRARY_FILE, normalized)
+    # 方案 A②：本轮**内容未变**的方案沿用磁盘原文（JSON 等值判定），只规范化真正被改的那个。
+    # 少了这条，任何一次保存都会把所有方案的扁平文本按当前代码基座重算 —— 与本次改动
+    # 无关的方案也会被改写（写放大 + 无关 diff）。
+    incoming = payload.get("profiles") if isinstance(payload.get("profiles"), dict) else {}
+    for pid, stored in _stored_profiles().items():
+        proposed = incoming.get(pid) or incoming.get(str(pid))
+        if isinstance(proposed, dict) and _unchanged_profile(pid, proposed, stored):
+            normalized["profiles"][pid] = stored
+    _save_store(normalized)
 
 
 def resolve_profile(profile: dict[str, Any]) -> dict[str, Any]:
@@ -840,11 +1030,18 @@ def delete_profile(profile_id: str) -> None:
 
 @_locked_library
 def activate_profile(profile_id: str) -> dict[str, Any]:
-    library = load_library()
-    profile = get_profile(profile_id)
+    """切换启用方案（方案 A①）：只改 `active_profile_id` 这一个字段。
+
+    旧实现走 `save_library(load_library())`，于是「切换 A 方案」会把**所有**方案的扁平
+    文本按当前代码基座重算写回（实测改掉 3 个字段、stable 文本 298 → 6490，git diff
+    看起来像策略被换了）。本函数只改指针；v1 单方案文件等非 v2 形态自动回落旧写路径。
+    """
+    profile = get_profile(profile_id)                      # 存在性 + 已停用校验
     if not profile.get("enabled", True): raise ValueError("该方案已停用")
-    library["active_profile_id"] = profile_id
-    save_library(library)
+    if not _set_active_profile_id(profile_id):
+        library = load_library()
+        library["active_profile_id"] = profile_id
+        save_library(library)
     return profile
 
 

@@ -340,13 +340,10 @@ class PromptRiskContractTests(unittest.TestCase):
 
     def test_section_titles_match_live_layout(self):
         """标题即接口：代码分节必须与线上 trading_system 布局一一对应，否则线上会用旧快照内容。"""
-        import json as _json
         import ai_brain_trader
         from prompt_library import text_to_modules
-        live_library = ROOT / "data" / "prompt_library.json"
-        if not live_library.exists():
-            self.skipTest("无线上快照（全新部署），跳过布局对齐检查")
-        lib = _json.loads(live_library.read_text(encoding="utf-8"))
+        from tests.config_sandbox import live_prompt_profile
+        lib = {"profiles": {"stable": live_prompt_profile(self)}}
         layout_titles = [m["title"] for m in lib["profiles"]["stable"]["pipelines"]["trading_system"]
                          if m.get("source") == "base"]
         code_titles = [m["title"] for m in text_to_modules(ai_brain_trader.SYSTEM_PROMPT, "base")]

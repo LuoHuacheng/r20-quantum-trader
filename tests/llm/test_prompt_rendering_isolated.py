@@ -181,8 +181,10 @@ class RenderingTests(Sandbox):
     def test_storage_roundtrip_retains_slots(self):
         profile = prompts._clean_profile(self.profile, "custom-test")
         prompts.save_library({"version": 2, "profiles": {"custom-test": profile}, "active_profile_id": "custom-test", "revisions": []})
-        disk = json.loads(prompts.LIBRARY_FILE.read_text())
-        for value in (disk["profiles"]["custom-test"]["trading_user"], prompts.active_profile()["trading_user"]):
+        # 落盘形状（单文件 / 一方案一文件）不是本用例的被测对象，故按**存储层 API** 读回：
+        # 断言的是「写进去的槽位能原样读出来」，而不是「磁盘上恰有一个 JSON 文件」。
+        persisted = prompts.load_library()["profiles"]["custom-test"]
+        for value in (persisted["trading_user"], prompts.active_profile()["trading_user"]):
             self.assertIn("{{account_balance}}", value)
             self.assertIn("{{account_positions}}", value)
             self.assertIn("{{pending_orders}}", value)

@@ -31,7 +31,7 @@
 | 模块 | 行数 | 说明 |
 |---|---|---|
 | `ai_brain_trader.py` | 1117 | AI 主脑全标的池决策引擎（与主脚本共用风控常量） |
-| `factor_library.py` | 334 | 多因子库：`compute_instrument_factors()` 逐标的装配因子（取数过公共限流闸） |
+| `factor_library.py` | 334 | 多因子库：`compute_instrument_factors()` 逐标的装配因子（取数过公共限流闸；直取 rubik 账户多空比已去重，仅在池里无值时兜底） |
 | `instrument_pool.py` | 409 | 交易宇宙（标的池）的**校验后**单一来源 |
 | `market_data_service.py` | 630 | 零进程直连公共行情服务；`_public_get/_public_post` 带**耗时/成败埋点**（调用期 `note_call`/`note_failure`，取值行为一字不变）+ 出网前过限流闸（第 244 刀，见下行） |
 | `okx_public_guard.py` | 205 | 公共只读行情的**限流 + 429 冷却**（第 244 刀）：按路径分档（rubik 最紧 ⇒ 0.60s）串行发出，某档被限流则该档静默 10s（听 `Retry-After`，上限 60s）不再出网；冷却**不跨档**（rubik 限流不得饿死蜡烛 ⇒ P0 拦单）；导出 `urlopen` 供各取数点 drop-in 接闸（静态门守“无 OKX 公共出网绕过”） |

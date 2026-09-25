@@ -218,15 +218,6 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     if ccy:
         try:
-            req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers=headers)
-            with _public_urlopen(req, timeout=3) as resp:
-                d = json.loads(resp.read().decode("utf-8"))
-                if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
-                    factors["smart_money_derivatives"]["long_short_ratio"] = str(d["data"][0][1])
-        except Exception:
-            pass
-
-        try:
             req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", headers=headers)
             with _public_urlopen(req, timeout=3) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
@@ -239,6 +230,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
             pass
 
     # SmartMoney Overlay（仅当真有数据源时覆盖缺失占位；无源时保留 available=False）
+    _overlay_set_ls = False
     if ccy in smart_money_pool:
         factors["smart_money_derivatives"]["available"] = True
         factors["smart_money_derivatives"]["reason"] = ""
@@ -254,6 +246,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
         factors["smart_money_derivatives"]["smart_money_flow_usd"] = net_str
         if ls.get("longShortRatio") is not None:
             factors["smart_money_derivatives"]["long_short_ratio"] = str(round(safe_float(ls.get("longShortRatio")), 2))
+            _overlay_set_ls = True
         long_avg = safe_float(notional.get("smartMoneyLongAvgEntry", 0))
         short_avg = safe_float(notional.get("smartMoneyShortAvgEntry", 0))
         if long_avg > 0:
@@ -273,6 +266,22 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
             factors["smart_money_derivatives"]["signal"] = "BULL_ACCUMULATION"
         elif w_long <= 35.0 and net_usdt < 0:
             factors["smart_money_derivatives"]["signal"] = "BEAR_DISTRIBUTION"
+
+    # 兜底直取：**只在没有任何来源填过这个字段时**才发这一发。
+    # 第二百四十四刀去重：池里有值时本调用是**纯浪费** —— 上面的 overlay 会用同一个
+    # 字段覆盖它，而它每 60s × 10 币就多打 10 发 rubik（本任务每分钟 ~50 发 OKX
+    # 请求里的 ~20 发，是稳态超限的主要来源）。
+    # ⚠️ 保留这道兜底：全部删掉会让“币安挂 + 池里没这个币”时的 long_short_ratio
+    # 从真值退成缺省 `--`（读不到 ≠ 没有）。
+    if ccy and not _overlay_set_ls:
+        try:
+            req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers=headers)
+            with _public_urlopen(req, timeout=3) as resp:
+                d = json.loads(resp.read().decode("utf-8"))
+                if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
+                    factors["smart_money_derivatives"]["long_short_ratio"] = str(d["data"][0][1])
+        except Exception:
+            pass
 
     # 复合 alpha 打分与信号建议（-100~+100）
     # 阶段 4·B3 第二十九刀：整段迁至 scripts/factors/scoring.py::score_composite_alpha，

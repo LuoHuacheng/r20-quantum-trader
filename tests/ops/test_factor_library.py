@@ -279,6 +279,43 @@ class RubikTests(_Base):
         self.assertEqual(self._compute()["smart_money_derivatives"]["long_short_ratio"],
                          "1.23")
 
+    def test_the_redundant_direct_fetch_is_skipped_when_the_pool_already_has_it(self):
+        """★ 第二百四十四刀去重：池里有值时**不再**多发那一发 rubik 直接取。
+
+        它的值紧接上面的 overlay 会被同一个字段覆盖 ⇒ 纯浪费；而它每 60s × 10 币
+        就多打 10 发 rubik（本任务每分钟 ~50 发 OKX 请求里的 ~20 发，是稳态超限与
+        429 的主要来源）。把兜底条件改回“无条件直取” ⇒ 本条当场红。
+        """
+        self._routes()                      # 合法路由表（含 rubik）
+        pool = {"BTC": {"longShortRatio": {"weightedLongRatio": 0.62, "longShortRatio": 1.8},
+                        "notional": {"netNotionalUsdt": 10000.0}, "winRate": {}}}
+        urls = []
+
+        def _rec(req, timeout=None):
+            urls.append(getattr(req, "full_url", str(req)))
+            return _dispatch(self.routes, req)
+
+        with mock.patch.object(FL.urllib.request, "urlopen", _rec):
+            row = self._compute(pool=pool)["smart_money_derivatives"]
+        self.assertNotEqual(row["long_short_ratio"], "--", "池里的值必须落进因子")
+        self.assertFalse([u for u in urls if "long-short-account-ratio" in u],
+                         "池里已有值却仍发了那一发 rubik ⇒ 去重被回退")
+
+    def test_the_direct_fetch_still_runs_when_the_pool_has_no_value(self):
+        """反证：池里**没有**值时兜底直取必须照旧发生（不能把这道兜底一并删掉）。"""
+        self._routes()
+        urls = []
+
+        def _rec(req, timeout=None):
+            urls.append(getattr(req, "full_url", str(req)))
+            return _dispatch(self.routes, req)
+
+        with mock.patch.object(FL.urllib.request, "urlopen", _rec):
+            row = self._compute(pool={})["smart_money_derivatives"]
+        self.assertEqual(row["long_short_ratio"], "1.23")
+        self.assertTrue([u for u in urls if "long-short-account-ratio" in u],
+                        "池里没值时必须保留兜底直取（否则该字段在币安挂时退成 --）")
+
     def test_a_zero_code_response_is_ignored(self):
         self._routes(**{"long-short-account-ratio": {"code": "50011", "data": [["t", "9"]]}})
         self.assertEqual(self._compute()["smart_money_derivatives"]["long_short_ratio"], "--")

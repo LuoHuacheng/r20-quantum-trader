@@ -25,11 +25,22 @@ class SyncStatusSidecarTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self._p_sfl = patch.object(sfl, "DATA_DIR", self.tmp.name)
+        # DATA_DIR 形如 <tmp>/data（与生产 <repo>/data 同形）⇒ 失败日志（由 DATA_DIR
+        # 的父目录推导）自然落在 <tmp>/logs，不会写进生产 logs/（实测过这个泄漏）。
+        self.data = os.path.join(self.tmp.name, "data")
+        os.makedirs(self.data, exist_ok=True)
+        self._p_sfl = patch.object(sfl, "DATA_DIR", self.data)
         self._p_sfl.start()
         self.addCleanup(self._p_sfl.stop)
         sfl._FETCH_STATUS.clear()
         self.addCleanup(sfl._FETCH_STATUS.clear)
+
+    def _log_lines(self):
+        path = os.path.join(self.tmp.name, "logs", "ledger_sync.log")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [ln for ln in fh.read().splitlines() if ln.strip()]
 
     def test_write_and_shape(self):
         sfl._mark("okx", "ok", truncated_at=100)
@@ -40,7 +51,7 @@ class SyncStatusSidecarTests(unittest.TestCase):
             simulated = True
 
         sfl._write_sync_status(_Env())
-        path = os.path.join(self.tmp.name, "ledger_sync_status.json")
+        path = os.path.join(self.data, "ledger_sync_status.json")
         self.assertTrue(os.path.exists(path))
         with open(path, encoding="utf-8") as fh:
             payload = json.loads(fh.read())
@@ -51,6 +62,33 @@ class SyncStatusSidecarTests(unittest.TestCase):
         # 时间戳必须带时区（读侧按 tz-aware 计算新鲜度）
         datetime.datetime.fromisoformat(payload["generated_at"])
 
+
+    def test_all_green_writes_no_failure_log(self):
+        """全绿轮不落日志 ⇒ 分钟级 sync 不会把日志文件撑大（不需要 rotation）。"""
+        sfl._mark("okx", "ok")
+
+        class _Env:
+            simulated = True
+
+        sfl._write_sync_status(_Env())
+        self.assertEqual(self._log_lines(), [])
+
+    def test_failed_venue_appends_the_reason_to_the_durable_log(self):
+        """★ 旁车每轮被**覆盖**、sync 子进程的 stdout 又只在 rc≠0 时打印 ⇒ 失败 reason
+        必须落到一个**追加**的日志里；否则事后只看得见「失败所: okx」，查不到原因
+        （2026-09-25 实测：现场只能重建到“某次 OKX 取数抛异常”，拿不到那句异常）。
+        """
+        sfl._mark("okx", "failed", reason="HTTP Error 429: Too Many Requests")
+
+        class _Env:
+            simulated = True
+
+        sfl._write_sync_status(_Env())
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 1, "失败轮必须恰好追加一行")
+        self.assertIn("env=demo", lines[0])
+        self.assertIn("okx=failed", lines[0])
+        self.assertIn("HTTP Error 429: Too Many Requests", lines[0])
 
     def test_unconfigured_venue_omitted_from_sidecar(self):
         """未配置凭证的场所不进旁车 —— 否则界面把「没账户」显示成「binance ok」。
@@ -73,7 +111,7 @@ class SyncStatusSidecarTests(unittest.TestCase):
             sfl._write_sync_status(_Env())
 
         payload = json.loads(
-            Path(self.tmp.name, "ledger_sync_status.json").read_text(encoding="utf-8"))
+            Path(self.data, "ledger_sync_status.json").read_text(encoding="utf-8"))
         self.assertEqual(sorted(payload["venues"]), ["okx"],
                          "未配置凭证的场所仍被写成 ok，旁车对外说谎")
 
@@ -94,7 +132,7 @@ class SyncStatusSidecarTests(unittest.TestCase):
             sfl._write_sync_status(_Env())
 
         payload = json.loads(
-            Path(self.tmp.name, "ledger_sync_status.json").read_text(encoding="utf-8"))
+            Path(self.data, "ledger_sync_status.json").read_text(encoding="utf-8"))
         self.assertIn("binance", payload["venues"])
         self.assertEqual(payload["venues"]["binance"]["status"], "failed")
 

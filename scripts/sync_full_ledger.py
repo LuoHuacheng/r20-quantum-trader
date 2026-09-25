@@ -164,6 +164,33 @@ def _write_sync_status(env):
             except OSError:
                 pass
 
+    # 旁车每轮被**覆盖** ⇒ 上一轮的 reason 事后无处回溯；而 `run_script` 只在 rc≠0 时
+    # 打印子进程输出，本脚本内部把取数异常吞成 `_mark(failed)` ⇒ rc 恒 0 ⇒ 那句
+    # `[sync_full_ledger] OKX 台账同步跳过: …` 直接丢掉（2026-09-25 实测：熔断文案只说
+    # 「失败所: okx」，原因查不到）。故非全绿（有 failed/partial 或无主活仓）时**追加**
+    # 一行到 `logs/ledger_sync.log`：只写异常轮 ⇒ 文件几乎不长，无需 rotation。
+    _bad = {v: r for v, r in (payload["venues"] or {}).items()
+            if isinstance(r, dict) and r.get("status") != "ok"}
+    if _bad or _unm["count"]:
+        try:
+            # ⚠️ 日志目录必须**调用时**从 DATA_DIR 推导（`<data 的父目录>/logs`），
+            # 不得在 import 期烘成独立常量：本仓大量用例靠 patch `DATA_DIR` 沙箱化写入，
+            # 独立常量会让那些用例照样写生产 logs/（实测泄漏：
+            # `tests/ops/test_sync_full_ledger_tails.py` 的合成失败行落进生产日志）。
+            # 同轴推导后，patch DATA_DIR ⇒ 日志一起进沙箱；生产 `R20_DATA_DIR` 不存在
+            # ⇒ 仍是 `<仓库根>/logs`（逐位不变）。
+            _logs = os.path.join(os.path.dirname(DATA_DIR), "logs")
+            os.makedirs(_logs, exist_ok=True)
+            _detail = " ".join(
+                f"{v}={r.get('status')}"
+                + (f"({str(r.get('reason') or '')[:200]})" if r.get("reason") else "")
+                for v, r in _bad.items()) or "ok"
+            with open(os.path.join(_logs, "ledger_sync.log"), "a", encoding="utf-8") as _f:
+                _f.write(f"[{payload['generated_at']}] env={payload['environment']} "
+                         f"unmanaged={_unm['count']} {_detail}\n")
+        except Exception as exc:
+            print(f"[sync_full_ledger] warn 台账同步日志写入失败: {exc}")
+
 
 INITIAL_STATE_FILE = os.path.join(DATA_DIR, "account_initial_state.json")
 POSITION_TRACKER_FILE = os.path.join(DATA_DIR, "position_trackers.json")

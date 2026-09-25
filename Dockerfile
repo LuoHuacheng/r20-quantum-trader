@@ -17,6 +17,8 @@ RUN npm ci --prefer-offline || npm install
 
 # 复制前端源码并构建
 COPY frontend/ ./
+# frontend/public/images 是指向 docs/images 的软链，需补齐软链目标（/build/public -> /docs/images）
+COPY docs/images /docs/images
 RUN npm run build
 
 # ------------------------------------------------------------------------------

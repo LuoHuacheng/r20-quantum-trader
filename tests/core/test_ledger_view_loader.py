@@ -6,7 +6,7 @@
 |---|---|
 | ★ **持仓中永远保留** | 过滤条件是「`close_time`/`open_time`/`time` 任一 ≥ reset」**或** `status == "holding"` ⇒ 持仓中的行**不受 reset 影响** |
 | 截断 | `trades_table = valid[:LEDGER_TRADES_MAX]`（取**前** 60，按文件原始顺序）|
-| ★ **同步闸门（批E 测试封闭闸）** | `autosync_enabled=False` ⇒ **不触发**同步；`R20_LEDGER_SYNC_DISABLED ∈ {1,true,yes}` ⇒ 也不触发；台账文件 **60 秒内**改过 ⇒ 不需要同步 |
+| ★ **同步闸门（批E 测试封闭闸）** | `autosync_enabled=False` ⇒ **不触发**同步；`R20_LEDGER_SYNC_DISABLED ∈ {1,true,yes}` ⇒ 也不触发；台账文件在 `LEDGER_SYNC_MIN_INTERVAL_SECONDS`（**300 秒**，旧值 60）内改过 ⇒ 不需要同步 |
 | ★ **审计批7 的修复** | 触发时走 `r20_backend.spawn.run_script(..., timeout=45, label="sync_full_ledger")` —— 旧实现是 `python3` **shell 串**（这台主机**根本没有该可执行文件**，rc=127 被 `capture_output` **吞**）⇒ **服务器侧台账刷新从未生效**；旧 `timeout=10s` 还**短于**真实三所全史拉取（约 20-30s）⇒ **必然静默超时** |
 | ★ 快照优先序 | 行内 `_SNAPSHOT_KEYS`（**非空** dict）＞ `holding` 行的 tracker `signal_snapshot` ＞ `calculus_snapshot.json` ＞ `match_trade_snapshot`（journal）＞ calculus 兜底 |
 | ★ **缺席即缺席** | 一行都拿不到证据 ⇒ **不写 `entry_snapshot`**，但**一定**写 `snapshot_observability="NONE"` |
@@ -91,6 +91,20 @@ class LedgerLoaderTest(unittest.TestCase):
     def test_recent_ledger_file_needs_no_sync(self):
         self._write([_row()])
         _v, _t, runner = self._run(autosync=True)
+        runner.assert_not_called()
+
+    def test_window_is_300s_not_60s(self):
+        """★ 第二百四十三刀：窗口 60s → 300s。120s 前改过的台账**不再**触发全史同步
+
+        （每轮 sync 打 OKX 认证端点 3~10 次；台账表最多滞后 5 分钟，持仓面板走
+        实时数据不受影响）。把窗口改回 60 秒 ⇒ 本条当场红。
+        """
+        os.makedirs(os.path.join(self.dir.name, "scripts"), exist_ok=True)
+        with open(os.path.join(self.dir.name, "scripts", "sync_full_ledger.py"),
+                  "w", encoding="utf-8") as f:
+            f.write("# stub\n")
+        self._write([_row()], age_seconds=120)
+        _v, _t, runner = self._run(autosync=True, env={"R20_LEDGER_SYNC_DISABLED": ""})
         runner.assert_not_called()
 
     def test_stale_ledger_triggers_the_fixed_sync_invocation(self):

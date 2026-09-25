@@ -215,6 +215,12 @@ def persist_dashboard_cache(data):
 
 CACHE_DATA = load_persisted_dashboard_cache()
 LAST_CACHE_TIME = 0
+#: 后台刷新线程的**最小重刷间隔**，取 `/api/all` 自身的陈旧闸（`get_all_data` 的
+#: `> 5.0` 判据）——若 worker 比这个闸更频，它就是在刷 API 根本不需要的新鲜度。
+#: 旧实现每 ~2s **无条件**刷一轮，而每轮固定外呼 balances/positions/pending_orders
+#: 三连（+ bills/algo）⇒ 本机 OKX 私有端点请求量的最大来源（≈100~150 次/分钟）。
+#: 面板新鲜度 SLA 不变：请求路径仍按 5.0s 闸在需要时自刷（`refresh_cache_if_needed`）。
+WORKER_MIN_INTERVAL_SECONDS = 5.0
 CACHE_LOCK = None
 SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="dashboard_sync")
 _BG_WORKER_THREAD = None
@@ -226,7 +232,10 @@ def _dashboard_background_worker_loop():
     time.sleep(0.5)
     while _BG_WORKER_RUNNING:
         try:
-            update_cache_cycle()
+            # 节流：与 /api/all 的陈旧闸同口径（否则 worker 白打 OKX，见常量注释）。
+            # 只读模块全局，无需 global 声明（赋值在 update_cache_cycle 内）。
+            if time.time() - LAST_CACHE_TIME >= WORKER_MIN_INTERVAL_SECONDS:
+                update_cache_cycle()
         except Exception:
             pass
         # Refresh every 2 seconds in background

@@ -34,6 +34,13 @@ __all__ = ["load_ledger_lifecycle_trades", "load_ledger_scoped", "LEDGER_TRADES_
 #: slim 侧不能再比本上限更紧，否则台账页必然少行。
 LEDGER_TRADES_MAX = 60
 
+#: 台账文件「够新」窗口 = 触发一次全史 sync 的最小间隔。
+#: 300s（旧值 60s）：每轮 sync 打 OKX 认证端点 3~10 次（positions + 两个历史接口分页，
+#: 三所全史实测 20~30s/轮）—— 一分钟跑一遍对一张最多滞后 5 分钟也无人受损的
+#: 展示表不值。代价：台账表的 **holding 行**最多滞后 5 分钟（持仓面板走实时数据
+#: 不受影响）；兜底还有主脑每 15 分钟的周期同步。要调就改这一个值。
+LEDGER_SYNC_MIN_INTERVAL_SECONDS = 300
+
 #: 逐单可观测性标签的合法取值（与 `scripts/evolution/observability.py` 同源）。
 _OBSERVABILITY_TAGS = ("DYNAMICS_OBSERVED", "PARTIAL", "PRICE_ONLY", "NONE")
 
@@ -154,7 +161,7 @@ def load_ledger_scoped(ledger_file, workspace_dir, autosync_enabled, reset_time_
     if os.path.exists(ledger_file):
         try:
             mtime = os.path.getmtime(ledger_file)
-            if time.time() - mtime < 60:
+            if time.time() - mtime < LEDGER_SYNC_MIN_INTERVAL_SECONDS:
                 need_ledger_sync = False
         except Exception:
             pass

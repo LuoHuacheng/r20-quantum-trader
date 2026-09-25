@@ -33,6 +33,11 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./backups:/app/backups
+      # 物理风控插件（读写挂载）：管理后台的插件代码编辑/新建/删除会直接写这些文件。
+      # 不挂载则容器内 /app/plugins 不存在 ⇒ 启用的插件一律被判「文件缺失」⇒
+      # interceptor_manager 对**每一笔**非 WAIT 信号 fail-closed 降级为 WAIT
+      # （实盘表现为「连续多轮空仓」）。
+      - ./plugins:/app/plugins
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://127.0.0.1:8080/api/v1/health || exit 1"]
       interval: 30s
@@ -61,6 +66,8 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./backups:/app/backups
+      # 与 backend 同源：调度器所在容器也要能读插件（风控闸在同一进程链上）
+      - ./plugins:/app/plugins
     depends_on:
       backend:
         condition: service_healthy

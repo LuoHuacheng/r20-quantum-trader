@@ -37,24 +37,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-
-  # ----------------------------------------------------------------------------
-  # 2. 量化网关与调度核心：15分钟波段扫描、因子刷新、AI 投委会与硬风控执行
-  # ----------------------------------------------------------------------------
-  gateway:
-    image: r20-quantum-trader:latest
-    container_name: r20-gateway
-    restart: unless-stopped
-    command: ["gateway"]
-    environment:
-      - TZ=Asia/Shanghai
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
-    volumes:
-      - ./.env:/app/.env
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./backups:/app/backups
-    depends_on:
-      backend:
-        condition: service_healthy

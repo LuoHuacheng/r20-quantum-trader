@@ -64,6 +64,12 @@ os.environ.setdefault("R20_SELF_IMPROVEMENT_LOG", os.path.join(_TEST_SANDBOX, "s
 # （打三所接口 + 重写 data/trading_ledger.json）。仪表盘相关测试走真实 DATA_DIR，
 # 于是测试会打真网络并改写生产台账——同款隔离：默认禁用该触发点。生产不设此变量。
 os.environ.setdefault("R20_LEDGER_SYNC_DISABLED", "1")
+# 第三百四十五刀：公共行情限流闸的**节拍**（`okx_public_guard`）默认在测试里关掉 ——
+# 万余例里那几条取数路径（brain packages / factor_library / smart_money / harvester）
+# 会被反复调用，真睡 0.12~0.60s 会把套件从 ~3 分钟拖到 ~5 分钟，而且那**不是在验证节拍**。
+# 节拍本身由 `tests/venues/test_okx_public_guard.py` 用假钟单独钉住（那里显式打开）。
+# **冷却（429 后停手）不受该开关影响** —— 它是安全属性。生产从不设该变量 ⇒ 真节拍。
+os.environ.setdefault("R20_PUBLIC_GUARD_PACE", "0")
 
 import r20_backend.config as _config
 

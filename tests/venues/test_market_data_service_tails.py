@@ -28,6 +28,7 @@ for _p in (str(ROOT), str(ROOT / "scripts")):
         sys.path.insert(0, _p)
 
 import scripts.market_data_service as mds  # noqa: E402
+import okx_public_guard as guard  # noqa: E402  （与 mds 同一运行时身份：顶层名优先）
 
 
 def _http(status=200, payload=None, *, json_exc=None):
@@ -68,6 +69,12 @@ class _Sandbox(unittest.TestCase):
 
 # ───────────────────── OKX 双域直连 ─────────────────────
 class PublicGetTests(unittest.TestCase):
+    def setUp(self):
+        # 限流器是**模块级有状态**对象（节拍 + 429 冷却）⇒ 不归零会让本文件的结果
+        # 取决于同进程里前面跑了什么（本文件的 POST 用例就会开 aigc 档冷却）。
+        guard.reset()
+        self.addCleanup(guard.reset)
+
     def _run(self, responses):
         sess = MagicMock()
         sess.get.side_effect = list(responses)
@@ -98,6 +105,30 @@ class PublicGetTests(unittest.TestCase):
         with patch.object(mds, "get_market_session", return_value=sess):
             mds._public_get("/api/v5/x")
         self.assertEqual(sess.get.call_count, len(mds.OKX_PUBLIC_HOSTS))
+
+    def test_a_429_short_circuits_the_next_call_in_the_same_bucket(self):
+        """★ 第二百四十四刀：被限流之后**不再出网**（旧行为是继续把本轮剩余请求打完，
+        还被 urllib3 × 双域放大到一次调用 6 个请求 ⇒ 越限越猛）。"""
+        sess = MagicMock()
+        sess.get.side_effect = [_http(status=429), _http(status=429),   # 首次：双域全 429
+                                _http(payload={"code": "0", "data": ["不该被调到这里"]})]
+        with patch.object(mds, "get_market_session", return_value=sess):
+            self.assertIsNone(mds._public_get("/api/v5/market/ticker", params={"instId": "BTC"}))
+            before = sess.get.call_count
+            self.assertIsNone(mds._public_get("/api/v5/market/ticker", params={"instId": "BTC"}),
+                              "冷却期该档必须直接放弃")
+        self.assertEqual(sess.get.call_count, before, "冷却期内一个网络请求都不许发")
+        self.assertTrue(guard.in_cooldown("/api/v5/market/candles"))
+
+    def test_a_429_in_one_bucket_does_not_starve_another(self):
+        """rubik 被限流不能把蜡烛一起饿死（蜡烛缺 → data_quality=invalid → P0 拦单）。"""
+        sess = MagicMock()
+        sess.get.side_effect = [_http(status=429), _http(status=429),
+                                _http(payload={"code": "0", "data": [["1", "2", "3", "4", "5", "6"]]})]
+        with patch.object(mds, "get_market_session", return_value=sess):
+            mds._public_get("/api/v5/rubik/stat/taker-volume", params={"ccy": "BTC"})
+            out = mds._public_get("/api/v5/market/candles", params={"instId": "BTC", "bar": "1H"})
+        self.assertEqual(out["data"][0][4], "5", "蜡烛必须照旧可取")
         self.assertEqual(len(mds.OKX_PUBLIC_HOSTS), 2, "www → aws 双域")
 
     def test_a_transport_exception_is_swallowed_and_the_next_host_is_tried(self):
@@ -120,6 +151,10 @@ class PublicGetTests(unittest.TestCase):
 
 
 class PublicPostTests(unittest.TestCase):
+    def setUp(self):
+        guard.reset()
+        self.addCleanup(guard.reset)
+
     def _run(self, responses):
         sess = MagicMock()
         sess.post.side_effect = list(responses)

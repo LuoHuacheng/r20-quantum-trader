@@ -19,7 +19,7 @@
 |---|---|---|---|
 | `ai_factor_trader.py` | 2801 | **每 15 分钟**（:00/:15/:30/:45） | 实盘主脚本。因子→选所→下单→持仓管理全链路 |
 | `daemon_web_sync.py` | 47 | 常驻循环 | 拉起 `sync_web_data.generate_trading_data()`，并定时采集新闻/因子 |
-| `news_sentiment_harvester.py` | 453 | 由上面那个守护调用 | 多源新闻采集 + 黑天鹅熔断哨兵 |
+| `news_sentiment_harvester.py` | 678 | 由上面那个守护调用 | 多源新闻采集 + 黑天鹅熔断哨兵（OKX 公告/多空比那两个出网点已过公共限流闸） |
 | `daily_summary_and_backup.py` | 124 | 每日 | 每日量化简报 |
 | `nightly_backup_and_clean.py` | 86 | 每日 02:00 | 跑配置好的备份作业 + 清理 |
 | `cleanup_disk.py` | 125 | 按需/定时 | 磁盘与日志清理 |
@@ -31,9 +31,10 @@
 | 模块 | 行数 | 说明 |
 |---|---|---|
 | `ai_brain_trader.py` | 1117 | AI 主脑全标的池决策引擎（与主脚本共用风控常量） |
-| `factor_library.py` | 298 | 多因子库：`compute_instrument_factors()` 逐标的装配因子 |
+| `factor_library.py` | 334 | 多因子库：`compute_instrument_factors()` 逐标的装配因子（取数过公共限流闸） |
 | `instrument_pool.py` | 409 | 交易宇宙（标的池）的**校验后**单一来源 |
-| `market_data_service.py` | 562 | 零进程直连公共行情服务；`_public_get/_public_post` 带**耗时/成败埋点**（调用期 `note_call`/`note_failure`，取值行为一字不变） |
+| `market_data_service.py` | 630 | 零进程直连公共行情服务；`_public_get/_public_post` 带**耗时/成败埋点**（调用期 `note_call`/`note_failure`，取值行为一字不变）+ 出网前过限流闸（第 244 刀，见下行） |
+| `okx_public_guard.py` | 205 | 公共只读行情的**限流 + 429 冷却**（第 244 刀）：按路径分档（rubik 最紧 ⇒ 0.60s）串行发出，某档被限流则该档静默 10s（听 `Retry-After`，上限 60s）不再出网；冷却**不跨档**（rubik 限流不得饿死蜡烛 ⇒ P0 拦单）；导出 `urlopen` 供各取数点 drop-in 接闸（静态门守“无 OKX 公共出网绕过”） |
 | `market_data_health.py` | 266 | 行情取数可观测性：失败**计数 + 每类一次性告警**（第 137 刀）+ 调用**耗时/成功率/百分位**与跨进程快照 `data/market_data_health.json`（第 138 刀；worker 每周期写、后端 `/metrics` 读） |
 | `market_stream.py` | 481 | 公共行情 **WebSocket 只读层**（帧解析三所归一 / 有界 tick 缓冲 / 健康账本与陈旧度 / `--probe` 探测 CLI）。**不常驻、不接决策与下单路径**；REST 取数一字未动。快照 `data/market_stream_health.json` 经 `/metrics` 暴露（可选源 `required="0"`）。三条实测坑写在模块 docstring：Gate 期货专用域、Binance 路径式订阅、Gate 订阅应答不是 tick |
 | `calculus_engine.py` | 71 | 因果微积分 / 定积分 / 概率论引擎 |

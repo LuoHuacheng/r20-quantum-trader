@@ -34,6 +34,16 @@ from scripts.factors.scoring import score_composite_alpha
 from scripts.factors.candles_15m import compute_15m_indicators
 from concurrent.futures import ThreadPoolExecutor
 
+# OKX 公共只读的**限流 / 429 冷却**（第二百四十四刀）：本文件每个币种有 5 处裸
+# `urllib.request.urlopen`（ticker/funding/OI/rubik×2）而 `compute_instrument_factors`
+# 是 6 线程并发 ⇒ 本任务**每 60s** 就会把 ~50 个请求在一两秒内打完，而 OKX 的
+# rubik 档只有 5req/2s ⇒ 尾部的长仓比/主动成交必然 429（定态污染同一出口 IP 的
+# 其他进程，包括主脑）。接闸后请求被摊平（约 +16s，仍在 55s 任务超时内）。
+try:                      # 双拼写：两种 sys.path 布局下各有一个模块名
+    from okx_public_guard import urlopen as _public_urlopen
+except ImportError:       # pragma: no cover - 包导入路径
+    from scripts.okx_public_guard import urlopen as _public_urlopen
+
 _BJ = timezone(timedelta(hours=8))
 
 WORKSPACE_DIR = str(_PROJECT_ROOT)
@@ -98,7 +108,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     # 1. Ticker & Depth (Orderbook)
     try:
         req = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with _public_urlopen(req, timeout=3) as resp:
             d = json.loads(resp.read().decode("utf-8"))
             if d.get("code") == "0" and d.get("data"):
                 t = d["data"][0]
@@ -189,7 +199,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     # 5. Derivatives & SmartMoney
     try:
         req = urllib.request.Request(f"https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with _public_urlopen(req, timeout=3) as resp:
             d = json.loads(resp.read().decode("utf-8"))
             if d.get("code") == "0" and d.get("data"):
                 factors["smart_money_derivatives"]["funding_rate_pct"] = round(safe_float(d["data"][0].get("fundingRate")) * 100, 4)
@@ -198,7 +208,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
     try:
         req = urllib.request.Request(f"https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with _public_urlopen(req, timeout=3) as resp:
             d = json.loads(resp.read().decode("utf-8"))
             if d.get("code") == "0" and d.get("data"):
                 usd = safe_float(d["data"][0].get("oiUsd", 0))
@@ -209,7 +219,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
     if ccy:
         try:
             req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with _public_urlopen(req, timeout=3) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
                 if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
                     factors["smart_money_derivatives"]["long_short_ratio"] = str(d["data"][0][1])
@@ -218,7 +228,7 @@ def compute_instrument_factors(item: Dict[str, Any], smart_money_pool: Dict[str,
 
         try:
             req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with _public_urlopen(req, timeout=3) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
                 if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
                     b_vol = safe_float(d["data"][0][1])

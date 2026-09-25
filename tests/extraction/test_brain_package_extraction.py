@@ -58,10 +58,21 @@ class MoveIsLosslessTest(unittest.TestCase):
     #      `pkg["okx_latency_ms"] = max(1, int(round((time.time() - t_okx0) * 1000)))`
     #      的**新增**行（整行丢弃，两侧对齐后再逐行比对）
     # 同样由 `test_okx_latency_instrumentation_is_actually_wired` 正向钉住。
+    #
+    # 第二百四十四刀又给 5 处公共取数统一了**限流/429 冷却**（`scripts/okx_public_guard.py`）。
+    # 实现刻意只包 `urlopen` 这一层，于是逐行差异只剩**一字**：
+    #   ④ `with _public_urlopen(req, timeout=3) as resp:` →
+    #      `with urllib.request.urlopen(req, timeout=3) as resp:`（归一成搬运时的写法）
+    # 由 `test_all_five_public_fetches_go_through_the_rate_limit_guard` 正向钉住
+    # （5 处必须都过闸，且不得再有裸 `urlopen`）—— 白名单不允许被用来掩盖回退。
     _NOTE_RE = re.compile(r'^note_failure\("[a-z_0-9]+", exc\)$')
     _LATENCY_START_RE = re.compile(r"^t_okx0 = time\.time\(\)$")
     _LATENCY_PUBLISH_RE = re.compile(
         r'^pkg\["okx_latency_ms"\] = max\(1, int\(round\(\(time\.time\(\) - t_okx0\) \* 1000\)\)\)$')
+
+    #: 限流包装前后**唯一**的一字之差（只为归一化，不改变两侧其余任何一行）
+    _GUARDED_URLOPEN = "with _public_urlopen(req, timeout=3) as resp:"
+    _RAW_URLOPEN = "with urllib.request.urlopen(req, timeout=3) as resp:"
 
     # 又一次纯**新增**的文档化差异（第八十六刀后）：OKX ticker 取数接入时延埋点。
     # 搬运时没有这两行，之后的提交给主脑补了 okx_latency_ms 观测（仅为可观测性，
@@ -86,6 +97,9 @@ class MoveIsLosslessTest(unittest.TestCase):
             if self._NOTE_RE.match(stripped):
                 indent = ln[:len(ln) - len(ln.lstrip())]
                 ln = f"{indent}pass"
+            elif stripped == self._GUARDED_URLOPEN:
+                # 限流包装归一回搬运时的裸 urlopen（只差一个名字，故只換回来）
+                ln = ln.replace(self._GUARDED_URLOPEN, self._RAW_URLOPEN)
             elif stripped == "except Exception:":
                 ln = ln.replace("except Exception:", "except Exception as exc:")
             out.append(ln)
@@ -108,6 +122,19 @@ class MoveIsLosslessTest(unittest.TestCase):
         src = "\n".join(_submodule_function_lines())
         for marker in self._ADDED_INSTRUMENTATION:
             self.assertIn(marker, src, "放行的时延埋点不存在——白名单已被滥用")
+
+    def test_all_five_public_fetches_go_through_the_rate_limit_guard(self):
+        """正向断言：5 处公共取数必须都走 `_public_urlopen`（白名单不许掩盖删除或回退）。
+
+        裸 `urllib.request.urlopen` 在 10 币种并行下一轮打 ~50 个请求，而 OKX 的
+        rubik 档只有 5req/2s ⇒ 必然 429（2026-09-25 实测：最先倒的就是
+        `okx_ls_ratio` / `okx_taker_volume`）。退回裸调用 ⇒ 本条当场红。
+        """
+        src = "\n".join(_submodule_function_lines())
+        self.assertEqual(src.count(self._GUARDED_URLOPEN), 5,
+                         "5 处公共取数必须全部过限流闸（少一处就是一个漏限流的爆发源）")
+        self.assertNotIn(self._RAW_URLOPEN, src,
+                         "有取数退回裸 `urllib.request.urlopen` —— 限流被绕过")
 
     def test_failure_counters_are_actually_wired(self):
         """正向断言：6 处静默 except 必须各自接上失败计数（防止上一条的白名单被滥用）。"""

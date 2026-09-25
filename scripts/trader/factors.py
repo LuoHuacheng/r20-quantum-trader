@@ -30,6 +30,14 @@ import os
 import urllib
 import warnings
 
+# OKX 公共只读的**限流 / 429 冷却**（第二百四十四刀）：下面 BBO 取价那一处是裸
+# `urllib.request.urlopen`，每轮 10 币各一发（`market/` 档），与主脑/因子库/舆情
+# 共用同一出口 IP 的配额。
+try:                      # 双拼写：两种 sys.path 布局下各有一个模块名
+    from okx_public_guard import urlopen as _public_urlopen
+except ImportError:       # pragma: no cover - 包导入路径
+    from scripts.okx_public_guard import urlopen as _public_urlopen
+
 from r20_backend.execution import (
     calc_atr,
     calc_bollinger_squeeze,
@@ -176,7 +184,7 @@ def fetch_single_instrument_data(item, all_positions, usdt_available, *,
         # Fetch Real-time Orderbook Ticker BBO (Best Bid & Ask) for Precision Limit Placement
         try:
             req_t = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req_t, timeout=3) as response_t:
+            with _public_urlopen(req_t, timeout=3) as response_t:
                 d_t = json.loads(response_t.read().decode("utf-8"))
                 if d_t.get("code") == "0" and "data" in d_t and len(d_t["data"]) > 0:
                     t_item = d_t["data"][0]

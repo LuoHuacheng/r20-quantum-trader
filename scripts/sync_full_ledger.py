@@ -20,6 +20,13 @@ import scripts.okx_rest as okx_rest
 import scripts.okx_runtime as okx_runtime
 
 WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+#: OKX 公共只读的**限流 / 429 冷却**（第二百四十四刀）：本脚本只有一处直接出网
+#: （`/api/v5/public/instruments` 查 ctVal，进程内已有 `_CTVAL_CACHE` ⇒ 每个新合约最多一次），
+#: 但“所有 OKX 公共出网都过闸”这条不变式要靠静态门守（见 tests/venues/test_okx_public_guard.py）。
+try:                      # 双拼写：两种 sys.path 布局下各有一个模块名
+    from okx_public_guard import urlopen as _public_urlopen
+except ImportError:       # pragma: no cover - 包导入路径
+    from scripts.okx_public_guard import urlopen as _public_urlopen
 #: ⚠️ `R20_DATA_DIR` 是**测试沙箱专用环境变量**（由 tests/config_sandbox.isolate_config
 #: 设置、由 `run_script` 拉起的子进程继承）：跑测试时把 data/ 写入重定向到沙箱，
 #: **生产从不设置该变量 → 取值与原先逐位相同**。修复"测试经子进程写生产文件"
@@ -261,7 +268,7 @@ def get_ct_val(inst_name):
         req = urllib.request.Request(
             f"https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId={inst_id}",
             headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=4) as resp:
+        with _public_urlopen(req, timeout=4) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         rows = payload.get("data") or []
         ct = float(rows[0].get("ctVal", 1.0) or 1.0) if rows else 1.0

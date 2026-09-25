@@ -57,6 +57,14 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
+# OKX 公共只读的**限流 / 429 冷却**（第二百四十四刀）：只接 OKX 那一条（rubik 多空比分），
+# 其余是新闻站点（非 OKX，不入档）。舆情那个循环是**逐币串行**的 ⇒ 十发几乎同时出去，
+# 每 10 分钟撞一次 rubik 档限额；且它自带 `for attempt in range(2)` 重试 ⇒ 越限越猛。
+try:                      # 双拼写：两种 sys.path 布局下各有一个模块名
+    from okx_public_guard import urlopen as _public_urlopen
+except ImportError:       # pragma: no cover - 包导入路径
+    from scripts.okx_public_guard import urlopen as _public_urlopen
+
 WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: ⚠️ `R20_DATA_DIR` 是**测试沙箱专用环境变量**（由 tests/config_sandbox.isolate_config
 #: 设置、由 `run_script` 拉起的子进程继承）：跑测试时把 data/ 写入重定向到沙箱，
@@ -252,7 +260,7 @@ def fetch_okx_announcements(limit=15) -> list:
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             }
         )
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with _public_urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         for group in data.get("data", []):
             for it in (group.get("details", []) or []):
@@ -426,7 +434,7 @@ def fetch_okx_rubik_sentiment(ccy: str) -> dict:
     for attempt in range(2):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=4) as resp:
+            with _public_urlopen(req, timeout=4) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             rows = data.get("data") or []
             if rows and len(rows[0]) >= 2:

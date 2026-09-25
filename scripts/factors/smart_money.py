@@ -14,6 +14,14 @@ from typing import Any, Dict, List, Optional
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
+# OKX 公共只读的**限流 / 429 冷却**（第二百四十四刀）。⚠️ 只接 **OKX** 那三处：
+# 币安 `fapi.binance.com` 的限额/档位不在 `okx_public_guard` 的表里，接进来只会把它
+# 的 429 记到共享的 default 档上（详见该模块的边界说明）。
+try:                      # 双拼写：两种 sys.path 布局下各有一个模块名
+    from okx_public_guard import urlopen as _public_urlopen
+except ImportError:       # pragma: no cover - 包导入路径
+    from scripts.okx_public_guard import urlopen as _public_urlopen
+
 
 def fetch_smart_money_for_symbol(
     ccy: str,
@@ -104,7 +112,7 @@ def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) ->
     try:
         url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-pos-ratio?ccy={ccy}&period=5m"
         req = urllib.request.Request(url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _public_urlopen(req, timeout=timeout) as resp:
             d = json.loads(resp.read().decode("utf-8"))
             if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
                 raw_ratio = float(d["data"][0][1])
@@ -117,7 +125,7 @@ def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) ->
         try:
             url2 = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m"
             req2 = urllib.request.Request(url2, headers=_HEADERS)
-            with urllib.request.urlopen(req2, timeout=timeout) as resp:
+            with _public_urlopen(req2, timeout=timeout) as resp:
                 d2 = json.loads(resp.read().decode("utf-8"))
                 if d2.get("code") == "0" and d2.get("data") and len(d2["data"]) > 0:
                     raw_ratio2 = float(d2["data"][0][1])
@@ -132,7 +140,7 @@ def _fetch_from_okx_rubik(ccy: str, price: float = 0.0, timeout: float = 3.5) ->
     try:
         url_t = f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m"
         req_t = urllib.request.Request(url_t, headers=_HEADERS)
-        with urllib.request.urlopen(req_t, timeout=timeout) as resp:
+        with _public_urlopen(req_t, timeout=timeout) as resp:
             d_t = json.loads(resp.read().decode("utf-8"))
             if d_t.get("code") == "0" and d_t.get("data") and len(d_t["data"]) > 0:
                 b_vol = float(d_t["data"][0][1])

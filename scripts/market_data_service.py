@@ -35,6 +35,15 @@ try:
 except ImportError:                                    # pragma: no cover - 包导入路径
     from scripts.market_data_health import note_call, note_failure
 
+# 公共只读限流器（第二百四十四刀）。⚠️ 与 market_data_health 同一铁律：本模块会被
+# **两种拼写**导入（顶层名 / `scripts.` 前缀），而限流器是**有状态**的模块级对象 ——
+# 两种拼写拿到两个实例就会各自放行一半流量，限流形同虚设。故两条路径都要接。
+try:
+    from okx_public_guard import RateLimited, acquire as _guard_acquire, note_429 as _guard_note_429
+except ImportError:                                    # pragma: no cover - 包导入路径
+    from scripts.okx_public_guard import (             # type: ignore[no-redef]
+        RateLimited, acquire as _guard_acquire, note_429 as _guard_note_429)
+
 
 def _call_kind(method: str, path: str) -> str:
     """把请求路径归一成**有界**的指标 kind（`okx_public_get_ticker` 之类）。
@@ -109,9 +118,12 @@ def get_market_session() -> requests.Session:
                 retries = Retry(
                     total=2,
                     backoff_factor=0.35,
-                    # 429：OKX 公共行情按 IP 限频 40req/2s，引擎+面板共出口 IP 的部署
-                    # 易触发——重试（尊重 Retry-After）吸收突发，避免 1H/4H K线偶发拿空
-                    status_forcelist=[429, 500, 502, 503, 504],
+                    # ⚠️ 第二百四十四刀：429 **不再**交给 urllib3 重试。旧写法把它放进
+                    # status_forcelist ⇒ 一次逻辑调用先在本域重试 2 次、再轮到 aws 域
+                    # 同样重试 2 次 = 最多 6 个请求打在**已经被限流的** IP 上（越限越猛）。
+                    # 现在 429 由 `okx_public_guard` 统一管：见状态即开该档冷却，
+                    # 后续请求直接不发（调用方落备源/本地数学）。
+                    status_forcelist=[500, 502, 503, 504],
                     raise_on_status=False,
                 )
                 adapter = HTTPAdapter(
@@ -126,10 +138,25 @@ def get_market_session() -> requests.Session:
     return _SESSION
 
 
+def _guarded(kind: str, path: str) -> bool:
+    """过限流闸；返回 False = 该档正在 429 冷却，**本次不发请求**。
+
+    冷却期也记帐（调用 + 失败）：“拿不到数据”是既成事实，两条账必须同步累加 ——
+    只加一边会让 `failed_calls` 与 `failures` 两个口径打架（运维看到两个数就不信了）。
+    """
+    if _guard_acquire(path):
+        return True
+    note_call(kind, 0.0, ok=False)
+    note_failure(kind, RateLimited(f"429 冷却中，跳过请求（{path}）"))
+    return False
+
+
 def _public_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: float = 3.5) -> Optional[Dict[str, Any]]:
-    """Try primary then fallback OKX public endpoints."""
+    """Try primary then fallback OKX public endpoints（出网前过限流闸）。"""
     session = get_market_session()
     kind = _call_kind("get", path)
+    if not _guarded(kind, path):
+        return None
     for base in OKX_PUBLIC_HOSTS:
         url = f"{base}{path}"
         started = time.time()
@@ -143,6 +170,9 @@ def _public_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: flo
                 reason = f"code={data.get('code')} msg={str(data.get('msg'))[:80]}"
             else:
                 reason = f"http={resp.status_code}"
+                if resp.status_code == 429:
+                    _cd = _guard_note_429(path, getattr(resp, "headers", None))
+                    logger.warning("OKX 公共 GET %s 被限流(429) ⇒ 该档冷却 %.0fs", path, _cd)
             note_call(kind, time.time() - started, ok=False)
             note_failure(kind, MarketDataResponseError(reason))
         except Exception as exc:
@@ -155,10 +185,12 @@ def _public_get(path: str, params: Optional[Dict[str, Any]] = None, timeout: flo
 
 
 def _public_post(path: str, payload: Dict[str, Any], timeout: float = 4.0) -> Optional[Dict[str, Any]]:
-    """Try primary then fallback OKX public POST endpoints."""
+    """Try primary then fallback OKX public POST endpoints（出网前过限流闸）。"""
     session = get_market_session()
     headers = {"Content-Type": "application/json"}
     kind = _call_kind("post", path)
+    if not _guarded(kind, path):
+        return None
     for base in OKX_PUBLIC_HOSTS:
         url = f"{base}{path}"
         started = time.time()
@@ -172,6 +204,9 @@ def _public_post(path: str, payload: Dict[str, Any], timeout: float = 4.0) -> Op
                 reason = f"code={data.get('code')} msg={str(data.get('msg'))[:80]}"
             else:
                 reason = f"http={resp.status_code}"
+                if resp.status_code == 429:
+                    _cd = _guard_note_429(path, getattr(resp, "headers", None))
+                    logger.warning("OKX 公共 POST %s 被限流(429) ⇒ 该档冷却 %.0fs", path, _cd)
             note_call(kind, time.time() - started, ok=False)
             note_failure(kind, MarketDataResponseError(reason))
         except Exception as exc:

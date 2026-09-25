@@ -36,6 +36,18 @@ try:                      # 以脚本方式运行（SCRIPTS_DIR 在 sys.path 上
 except ImportError:       # 以 scripts.brain.* 包被导入（PROJECT_ROOT 在 sys.path 上）
     from scripts.market_data_health import note_failure
 
+# 公共只读**限流 / 429 冷却**（第二百四十四刀）：实现、档位表与全部理由在
+# `scripts/okx_public_guard.py`。为什么只包 `urlopen` 这一层：本函数 5 处公共取数
+# 原本直接 `urlopen`，而主脑 10 币种**并行** ⇒ 单轮约 50 个请求一瞬间打出，
+# 必然撞上 OKX 的 rubik 档限额；包在这一层后，本函数其余行**一字不动**
+# （逐行搬运门 `tests/extraction/test_brain_package_extraction.py` 只需放行
+# `urlopen` → `_public_urlopen` 这一处一字之差），且既有的
+# `patch.object(urllib.request, "urlopen")` 类打桩全部继续生效。
+try:                      # 双拼写：两种 sys.path 布局下各有一个模块名
+    from okx_public_guard import urlopen as _public_urlopen
+except ImportError:       # pragma: no cover - 包导入路径
+    from scripts.okx_public_guard import urlopen as _public_urlopen
+
 
 def fetch_single_instrument_package(item: Dict[str, Any], *,
                                    fetch_candles,
@@ -88,7 +100,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     t_okx0 = time.time()
     try:
         req = urllib.request.Request(f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}", headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with _public_urlopen(req, timeout=3) as resp:
             d = json.loads(resp.read().decode("utf-8"))
             if d.get("code") == "0" and d.get("data"):
                 t = d["data"][0]
@@ -230,7 +242,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
     if item["type"] == "crypto":
         try:
             req = urllib.request.Request(f"https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with _public_urlopen(req, timeout=3) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
                 if d.get("code") == "0" and d.get("data"):
                     pkg["fundingRate"] = round(float(d["data"][0].get("fundingRate", 0)) * 100, 4)
@@ -239,7 +251,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
 
         try:
             req = urllib.request.Request(f"https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId={inst_id}", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with _public_urlopen(req, timeout=3) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
                 if d.get("code") == "0" and d.get("data"):
                     usd = float(d["data"][0].get("oiUsd", 0) or 0)
@@ -250,7 +262,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
         if ccy:
             try:
                 req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={ccy}&period=5m", headers=headers)
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with _public_urlopen(req, timeout=3) as resp:
                     d = json.loads(resp.read().decode("utf-8"))
                     if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
                         pkg["lsRatio"] = float(d["data"][0][1])
@@ -259,7 +271,7 @@ def fetch_single_instrument_package(item: Dict[str, Any], *,
 
             try:
                 req = urllib.request.Request(f"https://www.okx.com/api/v5/rubik/stat/taker-volume?ccy={ccy}&instType=CONTRACTS&period=5m", headers=headers)
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with _public_urlopen(req, timeout=3) as resp:
                     d = json.loads(resp.read().decode("utf-8"))
                     if d.get("code") == "0" and d.get("data") and len(d["data"]) > 0:
                         b_vol = float(d["data"][0][1])

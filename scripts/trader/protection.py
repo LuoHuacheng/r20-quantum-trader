@@ -44,6 +44,11 @@ def protection_signals(*, is_long, cur_px, hard_stop_px):
     )
 
 
+#: 保本止损垫（× 入场价）：把保底止损推到成本价**之上**一点点，覆盖 taker 费。
+#: **唯一来源** —— Tier1 棘轮与分批止盈（`scale_out.py`）的"移损保本"共用同一个垫子。
+#: 历史病灶：此处内联 `0.0020`、`scale_out.py` 另写 `0.0025`，同一次移损给出两个价位。
+BREAKEVEN_CUSHION_RATIO = 0.0020
+
 # 反过早收紧止损的三个判定常量（原门面内联字面量，逐个搬来、值不得改）
 EARLY_TIGHTEN_MIN_PROFIT_ATR = 1.2   # 浮盈须达 1.2x ATR 才算"有意义的盈利"
 EARLY_TIGHTEN_BUFFER_ATR = 0.7       # 现价与新止损之间须留 0.7x ATR 呼吸垫
@@ -108,8 +113,8 @@ def ratcheted_trailing_stop(*, is_long, entry_px, atr, prec, peak_profit_px,
         dynamic_floor_sl = max(dynamic_floor_sl, locked) if is_long else min(dynamic_floor_sl, locked)
         stage_desc = f"锁定大波段利润 (保底止损 {dynamic_floor_sl})"
     elif peak_profit_px >= tier1_breakeven_trigger:
-        breakeven = round(entry_px + 0.0020 * entry_px, prec) if is_long \
-            else round(entry_px - 0.0020 * entry_px, prec)
+        breakeven = round(entry_px + BREAKEVEN_CUSHION_RATIO * entry_px, prec) if is_long \
+            else round(entry_px - BREAKEVEN_CUSHION_RATIO * entry_px, prec)
         dynamic_floor_sl = max(dynamic_floor_sl, breakeven) if is_long else min(dynamic_floor_sl, breakeven)
         stage_desc = f"已推保本无风险 (保底止损 {dynamic_floor_sl})"
     return dynamic_floor_sl, stage_desc

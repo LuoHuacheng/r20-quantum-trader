@@ -201,12 +201,25 @@ class WritePromptSnapshotTests(unittest.TestCase):
 
 # ───────────────────────── trader/scale_out.py ─────────────────────────
 class ExecuteScaleOutTests(unittest.TestCase):
-    """分批止盈：**找不到跟踪器**与**交易所调用异常**两条路。"""
+    """分批止盈：**找不到跟踪器**与**交易所调用异常**两条路。
+
+    ⚠️ 夹具前置：OKX 路径在减仓前会走 **fail-closed 前置门禁**（要求跟踪器有
+    `takeProfitPx` 且注入了 `ensure_cloud_position_protection`）—— 缺任一项时
+    整个减仓被拒（否则就会先平半仓、再无法重挂保护 ⇒ 余仓裸奔）。这里把两个
+    前置条件补齐，好让下面几条真正要测的路径（下单路由 / 异常归集）跑得到。
+    """
 
     def setUp(self):
         self.actions: list = []
         self.trades: list = []
         self.records: list = []
+        self.oco_calls: list = []
+
+        def _ensure(*args, **kw):
+            self.oco_calls.append((args, kw))
+            return True, "stub"
+
+        self.ensure_oco = _ensure
 
     def _f(self, **over):
         f = {"instId": "BTC-USDT-SWAP", "name": "BTC", "price": 102.0,
@@ -225,12 +238,13 @@ class ExecuteScaleOutTests(unittest.TestCase):
               "record_trade": self.trades.append,
               "notify_trade_close": None, "close_fee": None,
               "close_trade_payload": None, "TAKER_FEE_RATE": 0.0005,
-              "ensure_cloud_position_protection": None}
+              "ensure_cloud_position_protection": self.ensure_oco}
         kw.update(over)
         return scale_out.execute_scale_out_if_eligible(
             f if f is not None else self._f(),
             pos if pos is not None else self._pos(),
-            trackers if trackers is not None else {"BTC-USDT-SWAP_long": {}},
+            trackers if trackers is not None
+            else {"BTC-USDT-SWAP_long": {"takeProfitPx": 110.0}},
             "2026-09-22 12:00:00", self.actions, **kw)
 
     def okx_rest(self):
@@ -285,7 +299,7 @@ class ExecuteScaleOutTests(unittest.TestCase):
         # 空头要"价格**低于**均价"才算浮盈（触发价在下方）；
         # 跟踪器键也跟着原始 side ⇒ 必须是 `_short`
         self._run(f=self._f(price=98.0), pos=self._pos(side="short"),
-                  trackers={"BTC-USDT-SWAP_short": {}})
+                  trackers={"BTC-USDT-SWAP_short": {"takeProfitPx": 90.0}})
         self.assertEqual(self.order_calls[0][0][1], "buy")
         self.assertEqual(self.order_calls[0][1]["pos_side"], "short")
 

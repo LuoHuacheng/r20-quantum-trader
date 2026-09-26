@@ -171,9 +171,9 @@ class ScaleOutExecutionTests(unittest.TestCase):
         # 验证旧 OCO 被撤销
         self.mock_okx.cancel_algo_orders.assert_called_once_with(["algo_1"], inst_id="BTC-USDT-SWAP")
 
-        # 验证新 OCO 重挂：剩余 5 张，保本止损价 80200 (80000 + 0.25%)
+        # 验证新 OCO 重挂：剩余 5 张，保本止损价 80160 (80000 + 0.20%)
         self.mock_ensure_oco.assert_called_once_with(
-            "BTC-USDT-SWAP", "long", 5.0, 85000.0, 80200.0
+            "BTC-USDT-SWAP", "long", 5.0, 85000.0, 80160.0
         )
 
         # 验证 tracker 状态变更与金字塔加仓互斥锁定
@@ -181,11 +181,133 @@ class ScaleOutExecutionTests(unittest.TestCase):
         self.assertEqual(t["scale_out_phase"], 1)
         self.assertEqual(t["currentSz"], 5.0)
         self.assertEqual(t["scale_count"], 999)
-        self.assertEqual(t["trailingStopPx"], 80200.0)
+        self.assertEqual(t["trailingStopPx"], 80160.0)
 
         # 验证台账双写与通知触发
         self.mock_record_trade.assert_called_once()
         self.mock_notify.assert_called_once()
+
+    def _run_ok_scale_out(self, pos=None, trackers=None):
+        """跑到成功分支并返回 (pos, trackers)，供下面几条回归断言复用。"""
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_okx.pending_algo_orders.return_value = [
+            {"algoId": "algo_1", "posSide": "long", "state": "live"}
+        ]
+        pos = self.sample_pos_long if pos is None else pos
+        trackers = self.sample_trackers if trackers is None else trackers
+        ok, reason = execute_scale_out_if_eligible(
+            self.sample_f_long, pos, trackers,
+            "2026-09-20 12:00:00", [],
+            okx_rest=self.mock_okx,
+            ensure_cloud_position_protection=self.mock_ensure_oco,
+        )
+        self.assertTrue(ok, reason)
+        return pos, trackers
+
+    def test_partial_close_never_loosens_the_ratcheted_stop(self):
+        """移损保本**不得把已经更紧的止损拽回去**。
+
+        真机 2026-09-26：棘轮/AI 已把 SL 推到 1.172，分批止盈无条件重设成保本垫
+        1.1582 ⇒ 剩余半仓风险反向放大 1.2%。这里把止损设在保本垫**之上**
+        （81000 > 80160）⇒ tracker 与云端 OCO 都必须停在 81000。
+        """
+        trackers = {
+            "BTC-USDT-SWAP_long": {
+                "initialSz": 10.0, "currentSz": 10.0, "takeProfitPx": 85000.0,
+                "trailingStopPx": 81000.0, "scale_out_phase": 0, "scale_count": 0,
+            }
+        }
+        _, trackers = self._run_ok_scale_out(trackers=trackers)
+        self.assertEqual(trackers["BTC-USDT-SWAP_long"]["trailingStopPx"], 81000.0)
+        self.mock_ensure_oco.assert_called_once_with(
+            "BTC-USDT-SWAP", "long", 5.0, 85000.0, 81000.0
+        )
+
+    def test_short_stop_ratchet_direction_is_mirrored(self):
+        """空头镜像：止损在保本垫**之下**（更紧）时取 min，不得放松。"""
+        f_short = dict(self.sample_f_long, price=78000.0)   # 空头浮盈 = 80000-78000 = 2000
+        pos_short = {"side": "short", "avgPx": 80000.0, "pos": 10.0, "venue": "okx"}
+        trackers = {
+            "BTC-USDT-SWAP_short": {
+                "initialSz": 10.0, "currentSz": 10.0, "takeProfitPx": 75000.0,
+                "trailingStopPx": 79000.0, "scale_out_phase": 0, "scale_count": 0,
+            }
+        }
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_okx.pending_algo_orders.return_value = [
+            {"algoId": "algo_1", "posSide": "short", "state": "live"}
+        ]
+        ok, reason = execute_scale_out_if_eligible(
+            f_short, pos_short, trackers, "2026-09-20 12:00:00", [],
+            okx_rest=self.mock_okx, ensure_cloud_position_protection=self.mock_ensure_oco,
+        )
+        self.assertTrue(ok, reason)
+        # 空头保本垫 = 80000 * (1 - 0.0020) = 79840；旧止损 79000 更紧 ⇒ 取 79000
+        self.assertEqual(trackers["BTC-USDT-SWAP_short"]["trailingStopPx"], 79000.0)
+        self.mock_ensure_oco.assert_called_once_with(
+            "BTC-USDT-SWAP", "short", 5.0, 75000.0, 79000.0
+        )
+
+    def test_refuses_to_scale_out_when_the_cloud_oco_cannot_be_rebuilt(self):
+        """**先斩后奏的 fail-open**：缺止盈价、或缺重挂通道时，旧实现仍会先市价平掉半仓、
+        先撤掉旧 OCO，然后在第 6 步整段跳过 ⇒ 剩余半仓裸奔。现在必须在**动交易所之前**
+        退出：不下平仓单、不撤保护单、tracker 状态机不动。
+        """
+        cases = (
+            ("缺止盈价", 0.0, self.mock_ensure_oco,
+             "跟踪器无止盈价，云端 OCO 无法重建 —— 拒绝无保护减仓"),
+            ("缺重挂通道", 85000.0, None,
+             "无云端保护重挂通道 —— 拒绝无保护减仓"),
+        )
+        for label, tp_px, ensure, expect in cases:
+            with self.subTest(case=label):
+                self.mock_okx.reset_mock()
+                self.mock_ensure_oco.reset_mock()
+                trackers = {"BTC-USDT-SWAP_long": {
+                    "initialSz": 10.0, "currentSz": 10.0, "takeProfitPx": tp_px,
+                    "trailingStopPx": 78000.0, "scale_out_phase": 0, "scale_count": 0}}
+                ok, reason = execute_scale_out_if_eligible(
+                    self.sample_f_long, dict(self.sample_pos_long), trackers,
+                    "2026-09-20 12:00:00", [],
+                    okx_rest=self.mock_okx,
+                    ensure_cloud_position_protection=ensure,
+                )
+                self.assertFalse(ok)
+                self.assertEqual(reason, expect)
+                self.mock_okx.place_order.assert_not_called()
+                self.mock_okx.cancel_algo_orders.assert_not_called()
+                self.mock_ensure_oco.assert_not_called()
+                self.assertEqual(trackers["BTC-USDT-SWAP_long"]["scale_out_phase"], 0)
+
+    def test_partial_close_updates_curr_pos_for_the_same_cycle(self):
+        """平仓后必须就地更新 `curr_pos["pos"]` —— 同轮下游（`position_exit` 的云端
+        覆盖核验）读的是**同一个快照**。真机 2026-09-26 19:00：平掉 204 后仓位 306，
+        却按旧快照 510 补挂 204，交易所留下 306+204=510 的保护腿。
+        """
+        pos, _ = self._run_ok_scale_out()
+        self.assertEqual(float(pos["pos"]), 5.0)
+
+    def test_net_short_pos_sign_is_preserved_by_the_in_place_update(self):
+        """净持仓模式下空头 `pos` 为负 ⇒ 就地更新必须保留符号，否则喂给下游的
+        平仓张数丢了负号（按多头方向处理）。"""
+        f_short = dict(self.sample_f_long, price=78000.0)
+        pos_net_short = {"side": "short", "avgPx": 80000.0, "pos": -10.0, "venue": "okx"}
+        trackers = {
+            "BTC-USDT-SWAP_short": {
+                "initialSz": 10.0, "currentSz": 10.0, "takeProfitPx": 75000.0,
+                "trailingStopPx": 81000.0, "scale_out_phase": 0, "scale_count": 0,
+            }
+        }
+        self.mock_okx.place_order.return_value = [{"ordId": "12345"}]
+        self.mock_okx.pending_algo_orders.return_value = [
+            {"algoId": "algo_1", "posSide": "net", "state": "live"}
+        ]
+        ok, reason = execute_scale_out_if_eligible(
+            f_short, pos_net_short, trackers, "2026-09-20 12:00:00", [],
+            okx_rest=self.mock_okx, ensure_cloud_position_protection=self.mock_ensure_oco,
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(float(pos_net_short["pos"]), -5.0)
 
     def test_idempotent_no_duplicate_scale_out(self):
         # scale_out_phase 已为 1 时，再次调用直接拒绝，绝不重复平仓
@@ -283,7 +405,7 @@ class ScaleOutExecutionTests(unittest.TestCase):
         mock_bn_adapter.cancel_protective_orders.assert_called_once_with("BTC")
         # 验证 Binance 为余仓挂载了新保护单
         mock_bn_adapter.attach_protective_orders.assert_called_once_with(
-            "BTC", "long", tp_px=85000.0, sl_px=80200.0, contracts=5.0
+            "BTC", "long", tp_px=85000.0, sl_px=80160.0, contracts=5.0
         )
 
     def test_gate_scale_out_cancels_old_protective_and_sets_reduce_only(self):
@@ -328,7 +450,7 @@ class ScaleOutExecutionTests(unittest.TestCase):
         mock_gate_adapter.cancel_protective_orders.assert_called_once_with("BTC")
         # 验证 Gate 为余仓挂载了新保护单
         mock_gate_adapter.attach_protective_orders.assert_called_once_with(
-            "BTC", "long", tp_px=85000.0, sl_px=80200.0, contracts=5.0
+            "BTC", "long", tp_px=85000.0, sl_px=80160.0, contracts=5.0
         )
 
     def test_cycle_parts_scale_out_tp_derivation(self):

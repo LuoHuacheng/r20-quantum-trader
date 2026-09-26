@@ -18,6 +18,11 @@ import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+# 保本垫与 Tier1 棘轮**同一个**常量（`protection.py` 是止损数学的归属地）。
+# **不兜底**：`protection.py` 无任何依赖、不可能 import 失败；而一个静默的本地副本
+# 会把本刀刚统一掉的「两套保本垫」原样复活。要断就断在 import 期。
+from scripts.trader.protection import BREAKEVEN_CUSHION_RATIO
+
 try:
     from scripts.risk_constants import (
         SCALE_OUT_ENABLED,
@@ -123,7 +128,17 @@ def execute_scale_out_if_eligible(
     # 4. 执行定向市价平仓（带有 reduceOnly=True）
     close_side = "sell" if is_long else "buy"
     pos_venue = str(curr_pos.get("venue") or curr_pos.get("exchange") or "okx").lower()
-    
+
+    # 4.1 前置门禁（fail-closed）：**动交易所之前**先确认减仓后能重建保护。
+    # 旧实现把这两个判据留在第 6 步（`and ensure_cloud_position_protection and
+    # take_profit_px > 0`）—— 而第 5 步已经无条件撤掉了旧 OCO。判据只要有一条为假，
+    # 第 6 步整段跳过 ⇒ 减仓后的剩余仓位**裸奔**（先斩后奏）。宁可不减仓。
+    if pos_venue == "okx":
+        if float(t.get("takeProfitPx", 0.0) or 0.0) <= 0:
+            return False, "跟踪器无止盈价，云端 OCO 无法重建 —— 拒绝无保护减仓"
+        if not ensure_cloud_position_protection:
+            return False, "无云端保护重挂通道 —— 拒绝无保护减仓"
+
     order_success = False
     order_detail = ""
 
@@ -196,6 +211,13 @@ def execute_scale_out_if_eligible(
         executed_actions.append(f"[{name}] ⚠️ 分批止盈市价平仓提交失败: {order_detail}")
         return False, "平仓提交失败"
 
+    # 4.5 同轮下游用的是**同一个** `curr_pos` 快照（`position_exit` 紧接着跑云端覆盖核验）。
+    # 不就地更新就会拿平仓前的张数去核减少后的覆盖 ⇒ 判成缺口、补挂出多余的腿。
+    # 真机实测 2026-09-26 19:00：平掉 204 后仓位 306，却按旧快照 510 补挂了 204，
+    # 交易所上留下 306+204=510 的保护腿。就地改，符号沿用原值（净持仓模式空头为负）。
+    _pos_sign = -1.0 if float(curr_pos.get("pos", 0) or 0) < 0 else 1.0
+    curr_pos["pos"] = _pos_sign * remaining_sz
+
     # 5. 原子级撤销旧 OCO / 保护单，避免超额单量穿仓反向开单与旧止损残留
     if pos_venue == "okx":
         try:
@@ -221,11 +243,19 @@ def execute_scale_out_if_eligible(
             print(f"[Scale-Out] 清理 {pos_venue.upper()} {name} 旧保护单异常: {cxl_exc}")
 
     # 6. 计算保本止损线并为剩余仓位重建云端 OCO
-    breakeven_cushion = 0.0025 * entry_px
-    breakeven_sl = round((entry_px + breakeven_cushion) if is_long else (entry_px - breakeven_cushion), prec)
+    # ⚠️ 移损保本**不得放松已有止损**：棘轮（`protection.ratcheted_trailing_stop`）与 AI 的
+    # `UPDATE_SL` 可能早已把止损推到保本垫之上 —— 无条件重设会把它拽回去。真机实测
+    # 2026-09-26：1.172 被重设回 1.1582，剩余半仓的风险反向放大了 1.2%。
+    # 只朝有利方向推进，与棘轮同一条规矩（多取 max / 空取 min）。
+    _be_raw = (entry_px + BREAKEVEN_CUSHION_RATIO * entry_px) if is_long \
+        else (entry_px - BREAKEVEN_CUSHION_RATIO * entry_px)
+    breakeven_sl = round(_be_raw, prec)
+    _old_sl = float(t.get("trailingStopPx", 0.0) or 0.0)
+    if _old_sl > 0:
+        breakeven_sl = max(breakeven_sl, _old_sl) if is_long else min(breakeven_sl, _old_sl)
     take_profit_px = float(t.get("takeProfitPx", 0.0) or 0.0)
 
-    if pos_venue == "okx" and ensure_cloud_position_protection and take_profit_px > 0:
+    if pos_venue == "okx":
         try:
             ensure_cloud_position_protection(
                 inst_id, pos_side, remaining_sz, take_profit_px, breakeven_sl

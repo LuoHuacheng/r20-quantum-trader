@@ -226,6 +226,7 @@ R20 Quantum Trader 是一套面向专业交易团队与量化交易员打造的*
 | **独立部署环境** | `STANDALONE.md` | 本地独立部署、环境变量配置与服务拉起指南 |
 | **应急故障恢复** | `RECOVERY_GUIDE.md` | 应急止损、冷备份数据恢复与进程重置预案 |
 | **提示词工程攻略** | `docs/PROMPT_GUIDE.md` | 全量实时语义数据字典、波段呼吸编写军规与投委会实战指南 |
+| **保证金预算配置** | `docs/MARGIN_BUDGET_CONFIG.md` | 「单笔顶 × 总额」怎么设/怎么改/怎么验：三参数不变式、哪个键真夹张数、总额闸与 2h 占用回笼 SOP、换档速查表 |
 
 **架构门禁保障机制**：
 1. **子包模块全登记**：`tests/audit/test_directory_docs_current.py` 强制检查受管子包新增模块必须写入各自 `__init__.py` 清单；

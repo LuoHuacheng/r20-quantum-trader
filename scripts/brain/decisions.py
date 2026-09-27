@@ -30,6 +30,130 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+try:  # 稳定 reason code（规划文档 §8.3）
+    from scripts.evolution.reasons import (ASSET_MULTIPLIER_APPLIED, ASSET_MULTIPLIER_EXPIRED,
+                                           ASSET_MULTIPLIER_INVALID)
+except ImportError:  # pragma: no cover
+    from evolution.reasons import (ASSET_MULTIPLIER_APPLIED, ASSET_MULTIPLIER_EXPIRED,
+                                   ASSET_MULTIPLIER_INVALID)
+
+#: 资产乘数允许区间（规划文档 §4.4-3 / §5.6）：超出即拒绝该项，不夹取到边界。
+ASSET_MULTIPLIER_RANGE = (0.5, 1.5)
+
+
+def _ledger_revision_of_report(data_dir: str) -> str:
+    """当前报告的台账 revision（用于判断乘数文件是否已被新证据超越）。"""
+    try:
+        with open(os.path.join(data_dir, "self_improvement_report.json"), "r",
+                  encoding="utf-8") as handle:
+            return str(json.load(handle).get("ledger_revision") or "")
+    except Exception:
+        return ""
+
+
+def load_asset_multiplier_state(data_dir: str) -> Dict[str, Any]:
+    """读取资产乘数并判定**可用性**（规划文档 §4.2-7 / §5.6）。
+
+    返回 `{multipliers, status, reason_codes, rejected}`：
+
+    - 文件不存在/损坏/非法 ⇒ 空乘数 + `UNAVAILABLE`（**不使用旧文件里的未知值**）；
+    - `expires_at`/`ttl_days`+`timestamp` 已过期 ⇒ 全部回 1.0 + `EXPIRED`；
+    - 带 `source_ledger_revision` 且与当前报告 revision 不一致 ⇒ `STALE`（等下一轮重新确认）；
+    - 逐项：非数值或超出 0.5~1.5 ⇒ **丢弃该项** + `INVALID`（不是夹到边界）；
+    - 无 provenance 的历史文件 ⇒ `LEGACY_UNVERIFIED`，仅按旧口径夹取后沿用（兼容）。
+    """
+    import datetime as _dt
+    mult_file = os.path.join(data_dir, "asset_multipliers.json")
+    state: Dict[str, Any] = {"multipliers": {}, "status": "UNAVAILABLE",
+                             "reason_codes": [], "rejected": []}
+    if not os.path.isfile(mult_file):
+        return state
+    try:
+        with open(mult_file, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        state["reason_codes"].append(ASSET_MULTIPLIER_INVALID)
+        return state
+    if not isinstance(payload, dict) or not isinstance(payload.get("multipliers"), dict):
+        state["reason_codes"].append(ASSET_MULTIPLIER_INVALID)
+        return state
+
+    raw = payload["multipliers"]
+    provenance = any(k in payload for k in ("source_ledger_revision", "expires_at", "ttl_days"))
+    lo, hi = ASSET_MULTIPLIER_RANGE
+    clean: Dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            state["rejected"].append({"symbol": str(key), "reason": "NOT_A_NUMBER"})
+            state["reason_codes"].append(ASSET_MULTIPLIER_INVALID)
+            continue
+        if not (lo <= numeric <= hi):
+            state["rejected"].append({"symbol": str(key), "reason": "OUT_OF_RANGE"})
+            state["reason_codes"].append(ASSET_MULTIPLIER_INVALID)
+            continue
+        clean[str(key)] = numeric
+
+    if not provenance:
+        # 历史文件（旧引擎产物）：带 provenance 的新文件一律走下面的严格判定。
+        state.update({"multipliers": clean, "status": "LEGACY_UNVERIFIED"})
+        return state
+
+    if payload.get("status") == "UNAVAILABLE":
+        state["reason_codes"].append(ASSET_MULTIPLIER_EXPIRED)
+        return state
+    expires_at = payload.get("expires_at")
+    if expires_at:
+        try:
+            text = str(expires_at)
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            deadline = _dt.datetime.fromisoformat(text)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=_dt.timezone.utc)
+            if _dt.datetime.now(_dt.timezone.utc) > deadline:
+                state["reason_codes"].append(ASSET_MULTIPLIER_EXPIRED)
+                return state
+        except (TypeError, ValueError):
+            state["reason_codes"].append(ASSET_MULTIPLIER_INVALID)
+            return state
+    elif payload.get("ttl_days") is not None and payload.get("timestamp"):
+        try:
+            age_days = None
+            text = str(payload["timestamp"])
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            stamp = _dt.datetime.fromisoformat(text)
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=_dt.timezone.utc)
+            age_days = (_dt.datetime.now(_dt.timezone.utc) - stamp).total_seconds() / 86400.0
+            if age_days > float(payload["ttl_days"]):
+                state["reason_codes"].append(ASSET_MULTIPLIER_EXPIRED)
+                return state
+        except (TypeError, ValueError):
+            state["reason_codes"].append(ASSET_MULTIPLIER_INVALID)
+            return state
+
+    source_revision = str(payload.get("source_ledger_revision") or "")
+    report_revision = _ledger_revision_of_report(data_dir)
+    if source_revision and report_revision and source_revision != report_revision:
+        # 版本/台账 revision 变化后乘数必须重新确认（§5.6）—— 本周期直接用 1.0。
+        state["reason_codes"].append(ASSET_MULTIPLIER_EXPIRED)
+        return state
+
+    status = str(payload.get("status") or "REVIEWED")
+    approval = payload.get("approval") if isinstance(payload.get("approval"), dict) else {}
+    if approval.get("required") and approval.get("status") != "APPROVED":
+        # 待人工审核的乘数不得自动生效（阶段 B 要求：观察或人工批准）。
+        state["multipliers"] = {k: 1.0 for k in clean}
+        state["status"] = "PENDING_REVIEW"
+        return state
+    if clean:
+        state["reason_codes"].append(ASSET_MULTIPLIER_APPLIED)
+    state.update({"multipliers": clean, "status": status or "REVIEWED"})
+    return state
+
 
 def validate_and_filter_decision(p: Dict[str, Any], d_item: Dict[str, Any], active_inst_ids: set,
                                  active_position_sides: Dict[str, str], *,
@@ -86,19 +210,54 @@ def assemble_decision_cache(
     p_summary = policy_snapshot.get("summary", "")
 
     standard_cache = {}
-    # Load dynamic asset multipliers from self-improvement review if present
-    asset_multipliers = {}
+    # 周期冻结（规划文档 §10.3）：交易主脑启动时冻结 policy/memory/baseline/注入条目，
+    # 本周期内记忆更新不得改变已经生成的订单意图（下一周期才读新版本）。
+    memory_evidence: Dict[str, Any] = {}
     try:
-        mult_file = os.path.join(data_dir, "asset_multipliers.json")
-        if os.path.isfile(mult_file):
-            with open(mult_file, "r", encoding="utf-8") as f:
-                mult_data = json.load(f)
-            asset_multipliers = mult_data.get("multipliers") or {}
-    except Exception:
-        pass
+        try:
+            from scripts import evolution_shield as _shield
+        except ImportError:  # pragma: no cover
+            import evolution_shield as _shield
+        _snapshot = _shield.read_memory_snapshot()
+        memory_evidence = {
+            "memory_revision": str(_snapshot.get("version") or ""),
+            "baseline_hash": _shield.baseline_manifest_hash(),
+            "injected_lesson_ids": [str(i.get("id")) for i in
+                                    _shield.select_injected_lessons(_snapshot.get("lessons") or [])["injected"]
+                                    if isinstance(i, dict) and i.get("id")],
+        }
+    except Exception as exc:
+        memory_evidence = {"error": str(exc)[:120]}
+    # 执行策略（规划文档 §7.1）：决策缓存与下单意图都携带它，
+    # 硬规则门禁按 `strategy_mode` 而非提示词名称选规则集；旧 profile 缺字段 ⇒ legacy。
+    # 读取失败时**不得伪装 legacy**（那等于把门禁静默关掉）⇒ 用 unknown 模式让门禁 fail-closed。
+    execution_policy: Dict[str, Any] = {}
+    try:
+        from scripts.strategy_rules import active_execution_policy, rule_set_hash, strategy_rule_version
+        resolved_policy = active_execution_policy()
+        execution_policy = {
+            "mode": resolved_policy["mode"],
+            "revision": resolved_policy["revision"],
+            "rule_set": resolved_policy["rule_set"],
+            "rule_set_hash": rule_set_hash(resolved_policy["rule_set"]),
+            "strategy_rule_version": strategy_rule_version(resolved_policy["rule_set"]),
+        }
+    except Exception as exc:
+        execution_policy = {"mode": "__unavailable__", "revision": 0, "rule_set": "",
+                            "rule_set_hash": "", "strategy_rule_version": "",
+                            "error": str(exc)[:120]}
+    # 资产乘数（规划文档 §5.6 边界）：只缩放模型申请的**保证金**，
+    # 不得提高杠杆、扩大止损、降低置信度门槛、覆盖冷却或生成新标的；
+    # 读取失败/过期/台账 revision 变化 ⇒ 1.0 + adaptive_multiplier_status。
+    multiplier_state = load_asset_multiplier_state(data_dir)
+    asset_multipliers = multiplier_state.get("multipliers") or {}
 
     for p in packages:
         inst_id = p["instId"]
+        # 门禁读取面：策略模式写进**入参包**（validate 的 4 参契约不变）。
+        p.setdefault("strategy_mode", execution_policy.get("mode") or "legacy")
+        p.setdefault("strategy_rule_version", execution_policy.get("strategy_rule_version") or "")
+        p.setdefault("rule_set_hash", execution_policy.get("rule_set_hash") or "")
         d_item = decisions_dict.get(inst_id, {})
         if not isinstance(d_item, dict):
             d_item = {}
@@ -115,10 +274,24 @@ def assemble_decision_cache(
         raw_margin = safe_float(d_item.get("margin_usdt") or d_item.get("margin_usd", 0.0))
 
         # Dynamically apply self-improvement asset multiplier (e.g. BTC 1.2x, DOGE 0.8x)
+        # 只作用于 margin_usdt（下方 `ai_margin`）——这是模型**申请**的保证金，
+        # 最终数量仍受止损风险/余额/单标的上限与组合上限约束。
         sym_key = inst_id.split("-")[0] if "-" in inst_id else inst_id
         mult = float(asset_multipliers.get(sym_key, asset_multipliers.get(inst_id, 1.0)))
-        mult = max(0.5, min(1.5, mult))
+        mult = max(ASSET_MULTIPLIER_RANGE[0], min(ASSET_MULTIPLIER_RANGE[1], mult))
         ai_margin = round(raw_margin * mult, 2) if raw_margin > 0 else 0.0
+        initial_risk_px = abs(entry - stop_loss) if (entry > 0 and stop_loss > 0) else None
+        risk_budget_snapshot = {
+            "margin_usdt": ai_margin,
+            "raw_margin_usdt": raw_margin,
+            "leverage": ai_leverage,
+            "confidence": confidence,
+            "entry_price": entry,
+            "stop_loss_price": stop_loss,
+            "initial_risk_px": initial_risk_px,
+            "asset_multiplier": round(mult, 4),
+            "asset_multiplier_status": multiplier_state.get("status"),
+        }
 
         # Ensure normalized keys exist for downstream interceptors
         normalized_d_item = dict(d_item)
@@ -175,6 +348,16 @@ def assemble_decision_cache(
                 "summary_reason": rejection_reason or str(d_item.get("summary_reason", "全市场矩阵综合评估中"))[:120]
             },
             "data_quality": p.get("data_quality", "invalid"),
+            # 策略/证据版本（§8.2）：台账与决策缓存都可回溯当时用的是哪套规则与记忆。
+            "strategy_mode": p.get("strategy_mode") or "legacy",
+            "strategy_rule_version": p.get("strategy_rule_version") or "",
+            "rule_set_hash": p.get("rule_set_hash") or "",
+            "execution_policy": dict(execution_policy),
+            "memory_evidence": dict(memory_evidence),
+            "risk_budget_snapshot": risk_budget_snapshot,
+            "asset_multiplier": round(mult, 4),
+            "adaptive_multiplier_status": multiplier_state.get("status"),
+            "asset_multiplier_reason_codes": list(multiplier_state.get("reason_codes") or []),
             "raw_ticker": {
                 "last": p.get("price"),
                 "bidPx": p.get("bidPx"),

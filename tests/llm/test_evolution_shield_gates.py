@@ -635,9 +635,11 @@ class PublishReviewTests(_Sandbox, unittest.TestCase):
         #    本函数不合并 `old`，只传新文本会把现有心法静默删光。
         #    真实调用方 `merge_memory_with_constitution`（ADD 分支）与
         #    `admin_mutate`（`candidates += active`）都会补齐。
+        # 规划文档 §4.1-3：发布前先合并代码基准 ⇒ 结果里除两条心法外还有 4 条基线。
         self.assertTrue(self._publish(["既有心法条目内容需要足够长",
                                        "应当保持耐心等待更好的入场时机"]))
-        self.assertEqual(len(es.load_structured_memory()), 2)
+        self.assertEqual(len(es.load_structured_memory()), 2 + len(es.BASELINE_LESSONS))
+        self.assertTrue(es.check_baseline_consistency(es.load_structured_memory())["healthy"])
 
     def test_a_rejected_candidate_raises_in_strict_mode(self):
         # `publish_review` 用 strict=True ⇒ 有被拒的新条目时**抛**，不是静默返回 False
@@ -661,8 +663,15 @@ class PublishReviewTests(_Sandbox, unittest.TestCase):
         with self.assertRaises(es.MemoryConflictError):
             self._publish(["应当保持耐心等待更好的入场时机"], expected_version="stale")
 
-    def test_an_identical_proposal_is_a_noop(self):
-        self.assertFalse(self._publish(["既有心法条目内容需要足够长"]))
+    def test_an_identical_proposal_still_repairs_missing_baselines(self):
+        # 规划文档 §4.1-3 / §2.1：权威文件丢失代码基线时，同一份提案会把基线补回。
+        # 这是**有意的**：否则基准心法缺失将永远无法通过普通发布流程恢复。
+        self.assertTrue(self._publish(["既有心法条目内容需要足够长"]))
+        self.assertTrue(es.check_baseline_consistency(es.load_structured_memory())["healthy"])
+        # 补回后再次发布同样的提案才是真正的 no-op
+        self.assertFalse(es.publish_review(["既有心法条目内容需要足够长"],
+                                           expected_version=self._version(),
+                                           sample_size=3, change_status="ADD"))
 
     def test_the_version_rotates_after_a_publish(self):
         before = self._version()

@@ -72,6 +72,7 @@ from scripts.trader.venue_protection import (
     watchdog_debounce_step,
 )
 from scripts.trader.entry_execution import (
+    apply_strategy_hard_gates,
     execute_entry_scan,
 )
 from scripts.trader.position_exit import (
@@ -113,6 +114,7 @@ from scripts.trader.ledger_writer import (
 )
 from scripts.trader.signal_snapshot import (
     build_signal_snapshot as _signal_snapshot_build,
+    build_strategy_entry_snapshot as _signal_snapshot_build_strategy,
 )
 from scripts.trader.circuit_guard import (
     check_black_swan_sentinel as _circuit_guard_sentinel,
@@ -881,7 +883,38 @@ def reconcile_reservation_ledger(real_pos_dict: Dict[str, Any],
 
 
 def submit_protected_limit_order(inst_id: str, side: str, pos_side: str, size: float, price: float, tp_px: float, sl_px: float, venue_ctx: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
-    """壳（第八十八刀搬至 `scripts/trader/order_submit.py`，调用期同名注入）。"""
+    """壳（第八十八刀搬至 `scripts/trader/order_submit.py`，调用期同名注入）。
+
+    2026-09-27（规划文档 §5.3 第 7 步）：在真正落单前做**最终策略复验** ——
+    重新读取当前规则集 hash 并与意图冻结的 hash 比对；不一致或规则不可读即拒绝。
+    非 AI 信号（无 execution_policy）不受影响。
+    """
+    try:
+        from scripts.strategy_rules import verify_order_intent_now
+        _gate_ok, _gate_reason = verify_order_intent_now(venue_ctx)
+        if not _gate_ok:
+            print(f"[策略硬规则] 下单前复验拒绝 {inst_id}: {_gate_reason}")
+            return False, f"策略硬规则复验拒绝: {_gate_reason}"
+    except Exception as _gate_exc:
+        print(f"[策略硬规则] 下单前复验不可用，fail-closed 拒绝 {inst_id}: {_gate_exc}")
+        return False, f"策略硬规则复验不可用: {_gate_exc}"
+    # 规划文档 §5.4/§5.5：用**最终止损距离**把张数压到单笔风险预算内（只减不增）。
+    # 数据来自 venue_ctx（order_intent 从标的池解析）；缺数据时原样放行（不改旧行为）。
+    try:
+        from scripts.trader.sizing import cap_size_by_stop_risk
+        _ctx = venue_ctx if isinstance(venue_ctx, dict) else {}
+        if _ctx.get("risk_budget_usd") and _ctx.get("ct_val"):
+            _capped_sz, _cap_note = cap_size_by_stop_risk(
+                size=size, entry_px=price, stop_px=sl_px, ct_val=_ctx.get("ct_val"),
+                risk_budget_usd=_ctx.get("risk_budget_usd"), min_sz=_ctx.get("min_sz") or 0.0)
+            if _capped_sz <= 0:
+                print(f"[风险张数] {inst_id} 拒绝发单: {_cap_note}")
+                return False, f"单笔风险预算拦截: {_cap_note}"
+            if _cap_note:
+                print(f"[风险张数] {inst_id} {_cap_note}")
+            size = _capped_sz
+    except Exception as _cap_exc:
+        print(f"[风险张数] 收紧计算跳过（不影响下单）: {_cap_exc}")
     return _order_submit_protected(
         inst_id, side, pos_side, size, price, tp_px, sl_px, venue_ctx,
         confirm_signal_reservation=confirm_signal_reservation,
@@ -919,8 +952,13 @@ def build_signal_snapshot(f: dict) -> dict:
 
     调用期解析 `DATA_DIR` 注入 —— `patch.object(aft, "DATA_DIR", tmp)`
     的既有专测面保真。
+
+    2026-09-27（规划文档 §3.3 / Task 2）：壳转调 **策略证据 v2** 组装器，
+    在旧 22 字段快照上补齐来源/时间戳/策略版本/风险几何 —— 这是开仓时刻
+    唯一写 journal 的路径，故 v2 字段在这里一次补齐，下游 `trackers`
+    与 `signal_journal` 同时拿到。
     """
-    return _signal_snapshot_build(f, data_dir=DATA_DIR)
+    return _signal_snapshot_build_strategy(f, data_dir=DATA_DIR)
 
 def _signal_journal_file() -> str:
     """**调用期**解析信号日记路径（与 `build_signal_snapshot(data_dir=DATA_DIR)` 同款）。
@@ -955,7 +993,20 @@ def record_signal_snapshot(snap: dict) -> None:
 
 
 def record_trade(trade_data):
-    """壳（第八十三刀搬至 `scripts/trader/ledger_writer.py`，调用期同名注入）。"""
+    """壳（第八十三刀搬至 `scripts/trader/ledger_writer.py`，调用期同名注入）。
+
+    2026-09-27（规划文档 §8.2 / Task 6）：落账前**盖证据章** —— 每笔交易都带
+    策略模式/规则版本/记忆 revision/初始止损与初始风险/快照来源与可观测性。
+    单点收口：所有 7+ 个平仓调用点都走这个壳，不需要改被对拍门钉住的 `_close_trade_payload`。
+    """
+    try:
+        from scripts.trader.evidence_stamp import stamp_trade_evidence
+        stamp_trade_evidence(
+            trade_data,
+            data_dir=os.path.dirname(os.path.abspath(LEDGER_JSON_FILE)),
+            trackers=load_trackers() if callable(globals().get("load_trackers")) else None)
+    except Exception as _stamp_exc:
+        print(f"[证据章] 台账证据补齐跳过（不影响落账）: {_stamp_exc}")
     return _ledger_writer_trade(
         trade_data,
         LEDGER_JSON_FILE=LEDGER_JSON_FILE,
@@ -1000,7 +1051,13 @@ def sync_cloud_algo_stop(inst_id: str, pos_side: str, new_sl: float, reason: str
     return _cloud_protection_sync_stop(inst_id, pos_side, new_sl, reason, okx_rest=okx_rest)
 
 def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, executed_actions):
-    """壳（第八十九刀搬至 `scripts/trader/position_exit.py`，调用期同名注入）。"""
+    """壳（第八十九刀搬至 `scripts/trader/position_exit.py`，调用期同名注入）。
+
+    2026-09-27（规划文档 §8.2）：对**本轮新建**的 tracker 回填策略/风险证据字段
+    （初始止损、初始风险、保本口径、策略与记忆版本）。回填只能在壳里做：
+    tracker 建档段在 `_position_exit_manage` 内，被 AST 对拍门逐字钉住。
+    """
+    _keys_before = set(trackers) if isinstance(trackers, dict) else set()
     try:
         from scripts.trader.scale_out import execute_scale_out_if_eligible
         execute_scale_out_if_eligible(
@@ -1017,7 +1074,7 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
     except Exception as _so_err:
         print(f"[Scale-Out] 分批止盈判定跳过: {_so_err}")
 
-    return _position_exit_manage(
+    _result = _position_exit_manage(
         f, curr_pos, trackers, timestamp_full, executed_actions,
         _float_or_zero=_float_or_zero,
         add_stop_cooldown=add_stop_cooldown,
@@ -1037,6 +1094,33 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
         notify_trade_close=notify_trade_close,
         protection_signals=protection_signals,
         ratcheted_trailing_stop=ratcheted_trailing_stop)
+    _backfill_tracker_evidence(f, curr_pos, trackers, _keys_before)
+    return _result
+
+
+def _backfill_tracker_evidence(f, curr_pos, trackers, keys_before):
+    """给本轮**新建**的 tracker 回填策略证据字段（§8.2 开仓侧）。
+
+    只处理新增键：已存在的 tracker 不能在本周期中途被改写（那等于事后改历史），
+    旧 tracker（本次改动前建档）下一次重建时自然拿到新字段。
+    """
+    try:
+        if not isinstance(trackers, dict):
+            return
+        new_keys = set(trackers) - set(keys_before or set())
+        if not new_keys:
+            return
+        # 规划文档 §8.2：开仓侧证据字段由 tracker 语义归属地（position_exit）提供，
+        # 实现在 evidence_stamp（与台账盖章共用一份推导）。
+        from scripts.trader.position_exit import tracker_evidence_fields
+        for key in new_keys:
+            entry = trackers.get(key)
+            if not isinstance(entry, dict):
+                continue
+            for field, value in tracker_evidence_fields(f, curr_pos, entry).items():
+                entry.setdefault(field, value)
+    except Exception as _ev_exc:
+        print(f"[证据回填] tracker 证据字段补齐跳过（不影响交易）: {_ev_exc}")
 
 def execute_ai_position_management(real_pos_dict, trackers, timestamp_full, executed_actions):
     """执行主脑写下的持仓指令。实现与两条安全语义见 scripts/trader/position_mgmt.py。
@@ -1225,6 +1309,20 @@ def execute_portfolio():
         save_trackers=save_trackers    )
 
     if not cb_active and pool_is_trustworthy():
+        # 规划文档 §5.4：开仓扫描前先用**统一策略规则**做硬门禁（被拒的标的降级 WAIT）。
+        try:
+            _gate_blocked = apply_strategy_hard_gates(
+                all_factors=all_factors, brain_cache=brain_cache,
+                log=lambda msg: executed_actions.append(msg))
+            for _b in _gate_blocked:
+                print(f"[策略硬门禁] {_b['instId']} 拒绝开仓: {_b['reason']}")
+        except Exception as _hard_gate_exc:
+            print(f"[策略硬门禁] 执行失败，按 fail-closed 冻结本周期新开仓: {_hard_gate_exc}")
+            for _f in all_factors:
+                _info = brain_cache.get(str(_f.get("instId"))) if isinstance(brain_cache, dict) else None
+                if isinstance(_info, dict) and isinstance(_info.get("decision"), dict):
+                    _info["decision"]["action"] = "WAIT"
+                    _info["decision"]["summary_reason"] = "策略硬门禁不可用，fail-closed 冻结新开仓"
         execute_entry_scan(
             all_factors=all_factors,
             brain_cache=brain_cache,

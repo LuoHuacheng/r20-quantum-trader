@@ -9,7 +9,8 @@
 
 | 模块 | 职责 | 注入面 |
 |---|---|---|
-| `observability.py` | 数理快照**可观测性**审计：字段表 / 门槛 / 逐单分类 / 剔除 null / 汇总 / 渲染摘要 | 无（纯计算；仅依赖 `r20_backend.time_utils.parse_beijing`） |
+| `observability.py` | 数理快照**可观测性**审计：字段表 / 门槛 / 逐单分类 / 剔除 null / 汇总 / 渲染摘要；**2026-09-27 扩展**：`STRATEGY_FIELDS` 策略链路字段、`classify_strategy_snapshot`（字段存在≠字段可信：来源/时间/版本不全即不得判完整）、`audit_snapshot_sources` 来源分布、`detect_reused_snapshots` 重复快照检测 | 无（纯计算；仅依赖 `r20_backend.time_utils.parse_beijing`） |
+| `reasons.py` | **稳定审计 reason code**（规划文档 §8.3）：`MEMORY_BASELINE_MISMATCH` / `SNAPSHOT_TIME_UNVERIFIED` / `SNAPSHOT_REUSED` / `RULE_PROPOSAL_*` / `HARD_RULE_BLOCKED` / `ASSET_MULTIPLIER_*`。纯常量，无副作用 —— 拒绝与降级事件按 code 分派，不依赖中文自由文本 | 无 |
 | `memory_review.py` | `apply_memory_review(...)` —— 复盘心法合并（**宪法级保护**：基准心法不得被进化输出删除，遗漏即补回并计数）+ 已学心法漏述即停用存档（审计 P1-8c）+ 发布到记忆服务（失败即保留既有权威） | `log_msg` / `merge_memory_with_constitution` 传入；`constitution_readded`/`preserve_existing_memory`/`retired_lessons` 三处 **in-out** |
 | `review_context.py` | `summarize_closed_trades(...)` 平仓统计 + 可观测性摘要（8 输出）；`build_host_constitution(...)` **宿主宪章**（Code is Law 代码层硬约束，profile 不可覆盖） —— 两者皆纯函数 | 依赖全部显式入参（零模块全局） |
 | `report.py` | `build_evolution_report(...)` —— 自进化**报告载荷**形状（14 入参 / 1 输出）：**18 个键即前端契约**（含 `insights`/`diagnosis_insights` 同对象、`retired_count` 等计数快照、`llm_error` 透出上游失败） | 零副作用、零全局读取 |

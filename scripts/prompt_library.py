@@ -369,6 +369,8 @@ EMPTY_CUSTOM = {
     "id": "custom-default", "name": "自定义方案", "description": "用自然语言调整策略，硬风控始终由系统锁定。", "editable": True,
     "enabled": True, "created_at": "", "updated_at": "", "editor_mode": "simple",
     "simple_policy": {"strategy": "", "review_focus": "", "participation": "balanced", "evidence": "strict", "risk_budget": "middle"},
+    # 规划文档 §7.1：执行策略随 profile 冻结（缺字段的旧档案解释为 legacy）。
+    "execution_policy": {"mode": "legacy", "revision": 1, "rule_set": "legacy@1"},
     "trading_system": "", "trading_user": "", "evolution_system": "", "evolution_user": "",
 }
 
@@ -458,9 +460,17 @@ def _unchanged_profile(pid: str, incoming: dict[str, Any], stored: Any) -> bool:
     对 `pipelines` 形态的方案，四类扁平文本是**派生缓存**（`resolve_profile` 读取时无条件
     用 `compile_modules` 覆盖），故不参与判定 —— 否则代码基座一变，磁盘上的陈旧缓存就被
     判成「已改动」，进而被整库重算写回（写放大与无关 diff 的另一半根因）。
+
+    规划文档 §7.1 补充：`_clean_profile` 会为**旧档案**注入默认 `execution_policy`
+    （语义等价于缺字段的 `legacy@1`）。它不是改动，不能因此把无关方案重写一遍。
     """
     if not isinstance(stored, dict) or str(stored.get("id") or "") != pid:
         return False
+    incoming = dict(incoming)
+    if "execution_policy" not in stored:
+        _default_policy = {"mode": "legacy", "revision": 1, "rule_set": "legacy@1"}
+        if incoming.get("execution_policy") == _default_policy:
+            incoming.pop("execution_policy", None)
     if isinstance(incoming.get("pipelines"), dict):
         drop = lambda item: {k: v for k, v in item.items() if k not in TEMPLATE_KEYS}
         return drop(incoming) == drop(stored)
@@ -738,6 +748,18 @@ def _clean_profile(raw: dict[str, Any], profile_id: str | None = None) -> dict[s
     }
     result["created_at"] = str(result.get("created_at") or now)
     result["updated_at"] = str(result.get("updated_at") or now)
+    # 规划文档 §7.1：执行策略随 profile 一起落盘（profile ID 与 execution mode 分开，
+    # 导入后生成新 ID 但**不丢**策略模式）。
+    _policy_raw = raw.get("execution_policy") if isinstance(raw.get("execution_policy"), dict) else {}
+    try:
+        from scripts.strategy_rules import resolve_execution_policy as _resolve_policy
+    except ImportError:  # scripts/ 在 sys.path 时
+        from strategy_rules import resolve_execution_policy as _resolve_policy
+    try:
+        result["execution_policy"] = _resolve_policy({"execution_policy": _policy_raw})
+    except Exception:
+        # 非法策略不进结果（调用方 update_profile 已在写前拒绝；此处兜底为 legacy）。
+        result["execution_policy"] = {"mode": "legacy", "revision": 1, "rule_set": "legacy@1"}
     for key in TEMPLATE_KEYS:
         result[key] = str(result.get(key) or "").strip()
     if result["editor_mode"] == "simple" and not isinstance(raw.get("pipelines"), dict):
@@ -970,7 +992,20 @@ def update_profile(profile_id: str, changes: dict[str, Any], note: str = "更新
         current = library["profiles"][profile_id]
     else:
         raise ValueError("提示词方案不存在")
-    accepted = {k: v for k, v in changes.items() if k in {"name", "description", "enabled", "editor_mode", "simple_policy", "pipelines", *TEMPLATE_KEYS}}
+    accepted = {k: v for k, v in changes.items() if k in {"name", "description", "enabled", "editor_mode", "simple_policy", "pipelines", "execution_policy", *TEMPLATE_KEYS}}
+    # 规划文档 §7.1：未知 mode / rule_set 不得激活 —— 保存时就拒绝，不留给运行时踩坑。
+    if "execution_policy" in accepted:
+        try:
+            from scripts.strategy_rules import resolve_execution_policy as _resolve_policy
+            accepted["execution_policy"] = _resolve_policy({"execution_policy": accepted["execution_policy"]})
+        except ImportError:
+            try:
+                from strategy_rules import resolve_execution_policy as _resolve_policy
+                accepted["execution_policy"] = _resolve_policy({"execution_policy": accepted["execution_policy"]})
+            except Exception as exc:
+                raise ValueError(f"执行策略非法: {exc}") from exc
+        except Exception as exc:
+            raise ValueError(f"执行策略非法: {exc}") from exc
     # 审计 P1-2 关键修复：调用方可以只提交一条管线（如心法页只提交 evolution_system），
     # 此时必须与**已存**管线逐键合并后再清理；否则未提到的管线会被扁平文本重建成
     # legacy 模块（丢掉 source=base 标签），下一轮 apply_module_layout 判定「无 base 模块」

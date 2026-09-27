@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any, Dict
 
 # 入场折扣硬地板：占现价的比例。
 #
@@ -103,9 +104,33 @@ def build_order_intent(*, is_long, inst_id, actual_sz, ct_val, limit_px, ai_leve
 
     `margin_usdt`（保证金闸门结果）与 `max_margin_usdt`（权益顶）由调用点算好传入，
     见模块 docstring：那两行**必须留在门面**，是计数锚点的载体。
+
+    2026-09-27（规划文档 §5.3 第 7 步 / §8.2）：额外透传**策略证据**（执行策略、
+    规则版本、风险预算快照、资管乘数状态）—— 下单前复验拿它比对当前规则 hash，
+    台账拿它回填 strategy_mode / policy_hash / initial_stop_px / initial_risk_px。
+    `ai_info` 是大脑决策缓存条目（含 `execution_policy` / `risk_budget_snapshot`）。
     """
     side = "buy" if is_long else "sell"
     pos_side = "long" if is_long else "short"
+    info = ai_info if isinstance(ai_info, dict) else {}
+    policy = info.get("execution_policy") if isinstance(info.get("execution_policy"), dict) else {}
+    # 规划文档 §5.4：下单前用**最终止损距离**核算风险预算（只减不增）。
+    # 风险预算来自标的池单一事实源；权益未知时退化为池内配置值。
+    limits: Dict[str, Any] = {}
+    try:
+        from scripts.trader.sizing import stop_risk_limits
+        from scripts.risk_constants import MAX_MARGIN_EQUITY_RATIO as _ratio
+        from scripts.risk_constants import MAX_SINGLE_ASSET_MARGIN as _abs_cap
+        equity_est = None
+        try:
+            cap = float(max_margin_usdt or 0.0)
+            if cap > 0 and 0 < float(_ratio) < 1 and cap < float(_abs_cap or 0):
+                equity_est = cap / float(_ratio)
+        except (TypeError, ValueError):
+            equity_est = None
+        limits = stop_risk_limits(inst_id, usdt_available=equity_est)
+    except Exception:
+        limits = {}
     venue_ctx = {
         "notional_usdt": actual_sz * ct_val * limit_px,
         "margin_usdt": margin_usdt,
@@ -117,5 +142,24 @@ def build_order_intent(*, is_long, inst_id, actual_sz, ct_val, limit_px, ai_leve
         "confidence": ai_conf,
         "intent_id": (f"{inst_id}:BUY_LONG" if is_long else f"{inst_id}:SELL_SHORT")
                      + f":{int(ai_info.get('timestamp') or time.time())}",
+        # 策略证据（纯附加键，旧消费方忽略未知键）
+        "strategy_mode": info.get("strategy_mode") or "legacy",
+        "strategy_rule_version": info.get("strategy_rule_version") or "",
+        "rule_set": policy.get("rule_set") or "",
+        "rule_set_hash": policy.get("rule_set_hash") or info.get("rule_set_hash") or "",
+        "policy_hash": info.get("policy_hash") or "",
+        "execution_policy": policy or None,
+        # 周期冻结的记忆证据（§10.3）
+        "memory_revision": info.get("memory_revision", ""),
+        "baseline_hash": info.get("baseline_hash", ""),
+        "injected_lesson_ids": info.get("injected_lesson_ids") or [],
+        "risk_budget_snapshot": info.get("risk_budget_snapshot") or {},
+        "asset_multiplier": info.get("asset_multiplier"),
+        "asset_multiplier_status": info.get("adaptive_multiplier_status"),
+        "setup_kind": policy.get("setup_kind") or "",
+        # §5.4：最终止损距离 → 单笔风险张数上限（submit 壳在落单前执行）
+        "ct_val": ct_val,
+        "min_sz": limits.get("min_sz") or 0.0,
+        "risk_budget_usd": limits.get("risk_budget_usd") or 0.0,
     }
     return side, pos_side, venue_ctx

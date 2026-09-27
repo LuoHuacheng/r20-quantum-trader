@@ -577,6 +577,11 @@ class ConfigEffectMatrixTests(_Base):
         "R20_MAX_RISK_REWARD": ("scripts/risk_constants.py", "MAX_RISK_REWARD_RATIO"),
         "R20_STOP_LOSS_ATR_MULT": ("scripts/risk_constants.py", "STOP_LOSS_ATR_MULT"),
         "R20_MAX_TAKE_PROFIT_ATR": ("scripts/risk_constants.py", "MAX_TAKE_PROFIT_ATR"),
+        # 规划文档 §5.7：相关组同向敞口 —— 数量闸门在核心拦截器，风险额闸门在多所发送前
+        "R20_MAX_GROUP_SAME_DIRECTION": ("r20_backend/interceptor_manager.py",
+                                         "MAX_GROUP_SAME_DIRECTION_POSITIONS"),
+        "R20_GROUP_RISK_CAP_RATIO": ("r20_backend/execution/risk_gates.py", "effective_group_cap"),
+        "R20_MAX_GROUP_RISK_USDT": ("r20_backend/execution/risk_gates.py", "effective_group_cap"),
     }
 
     def test_every_knob_has_an_enforcer(self):
@@ -602,6 +607,8 @@ class ConfigEffectMatrixTests(_Base):
             f"{rc.MAX_DAILY_LOSS_USDT:g}", f"{rc.MAX_SAME_DIRECTION_POSITIONS}", f"{rc.TIME_STOP_HOURS:g}",
             f"{rc.STOP_COOLDOWN_MINUTES}", f"{rc.MIN_SCALE_IN_CONFIDENCE:g}%",
             f"{rc.SCALE_OUT_TRIGGER_ATR:g}x ATR",
+            f"{rc.MAX_GROUP_SAME_DIRECTION_POSITIONS}",
+            f"{rc.effective_group_risk_cap(4989.41):g}",
         ]
         missing = [v for v in values if v not in text]
         self.assertEqual(missing, [], f"提示词小节缺这些生效值: {missing}")

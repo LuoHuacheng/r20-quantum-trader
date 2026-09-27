@@ -510,7 +510,16 @@ class MainGuardTests(unittest.TestCase):
     """CLI 入口：只做"摘要打印"，但其取键逻辑本身也要钉住。"""
 
     def _run_guard(self, result):
-        node = _find_node(lambda n: isinstance(n, ast.If) and n.lineno == 1012)
+        # ⚠️ 不要按行号定位 `if __name__ == "__main__":` —— 主脑文件每次改动
+        # 都会让硬编码行号漂移（2026-09-27 就因此红过）。改为按**结构**定位：
+        # 顶层 If，其 test 是比较 __name__ == "__main__"。
+        def _is_main_guard(n):
+            return (isinstance(n, ast.If)
+                    and isinstance(n.test, ast.Compare)
+                    and isinstance(n.test.left, ast.Name)
+                    and n.test.left.id == "__name__")
+
+        node = _find_node(_is_main_guard)
         module = ast.Module(body=[node], type_ignores=[])
         ast.fix_missing_locations(module)
         namespace = {

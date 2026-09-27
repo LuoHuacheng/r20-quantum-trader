@@ -129,7 +129,10 @@ class _PromptSandbox(unittest.TestCase):
         # ⚠️ `render_trading_memory` 是**函数体内** `from scripts.evolution_shield import ...`
         #    ⇒ 命名空间里注入的那个会被**局部名遮蔽**。必须 patch 源模块属性，
         #    这也正是"局部 import 要用源模块打桩"那条老规矩的又一例。
-        with patch.object(evolution_shield, "render_trading_memory",
+        # 规划文档 §6.3/§6.4：主脑改调**分层渲染**入口（`render_trading_memory_layered`，
+        # 内部读结构化权威 + 按 evidence_level 分块，权威为空时回落 legacy markdown）。
+        # 本用例测的是「渲染结果如何进入 runtime_context」，故替身该入口。
+        with patch.object(evolution_shield, "render_trading_memory_layered",
                           lambda md, js: self.memory_text):
             return self.construct(**kw)
 
@@ -294,9 +297,14 @@ class RuntimeVarsTests(_PromptSandbox, unittest.TestCase):
             self.assertIn(key, out, key)
 
     def test_memory_text_is_taken_from_the_injected_renderer(self):
+        """规划文档 §6.3：`trading_memory` 现在**前置**宿主硬规则区块（模块化布局只
+        替换 `{{trading_memory}}`，硬规则必须挂在同一个变量上才不会丢）。
+        渲染器文本仍原样在场。"""
         out = {}
         self._call(runtime_context_out=out)
-        self.assertEqual(out["trading_memory"], self.memory_text)
+        self.assertIn(self.memory_text, out["trading_memory"])
+        self.assertIn("【宿主硬规则", out["trading_memory"])
+        self.assertIn("【宿主硬规则", out["host_hard_rules"])
 
     def test_timezone_is_asia_shanghai(self):
         out = {}

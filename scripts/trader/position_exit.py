@@ -328,3 +328,17 @@ def manage_position_tp_and_trailing(f, curr_pos, trackers, timestamp_full, execu
 
     return False, "持仓监控中"
 
+
+
+def tracker_evidence_fields(f, curr_pos, entry):
+    """新建 tracker 应带的**策略/风险/证据**字段（规划文档 §8.2 开仓侧）。
+
+    本模块是 tracker 语义的归属地，故对外提供这个入口；推导逻辑与台账盖章
+    （`scripts/trader/evidence_stamp.py`）共用同一份实现 ——
+    初始止损取建档时的 `trailingStopPx`，`initial_risk_px = |entry - stop|`，
+    保本口径取自冻结规则集，策略/记忆版本取当前生效值。
+
+    ⚠️ 建档段本身由对拍门逐字钉住，故回填发生在门面壳里（`ai_factor_trader._backfill_tracker_evidence`）。
+    """
+    from scripts.trader.evidence_stamp import tracker_evidence_fields as _impl
+    return _impl(f, curr_pos, entry)

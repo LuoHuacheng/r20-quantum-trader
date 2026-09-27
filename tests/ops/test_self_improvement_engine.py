@@ -1049,17 +1049,22 @@ class ComposeEvolutionPromptsTests(_Base):
     def test_both_prompts_end_with_the_host_constitution(self):
         """★ profile 只能调风格，永远无法删改证据纪律与基准心法保护。
 
-        2026-09-23 起宪章**末条**是宿主追加的「5. 交易所分布」：它原先写在
-        evolution_user 模板里，风格档案整段替换模板就会被吞掉，故改为与宪章同源
-        的宿主追加。末尾断言因此落在第 5 条上——它同样是档案碰不到的宿主注入。
+        2026-09-23 起宪章末条是宿主追加的「5. 交易所分布」；2026-09-27（规划文档
+        §4.4-2）在它之后续写 6~10 条（证据边界/独立样本/资产乘数/参数不可改/baseline
+        一致性），故**末条**现在是第 10 条 baseline 一致性。两者都是宿主注入，
+        风格档案无论如何替换模板都碰不到。
         """
         system, user, _, _ = SIE.compose_evolution_prompts(self._trades(1.0))
         self.assertIn("宿主宪章", system)
         self.assertIn("宿主宪章", user)
         for doc in (system, user):
-            last = doc.rstrip().splitlines()[-1]
-            self.assertTrue(last.startswith("5. 交易所分布（宿主确定性统计，非模型推断）："), last)
+            last = doc.rstrip().splitlines()[-2]
+            self.assertTrue(last.startswith("10. baseline 一致性："), last)
             self.assertIn("NO_CHANGE 永不覆盖或清空长期记忆", doc)
+            self.assertIn("5. 交易所分布（宿主确定性统计，非模型推断）：", doc)
+            self.assertIn("同一信号拆成多笔订单", doc)
+            self.assertIn("资产乘数不是硬风控", doc)
+            self.assertIn("复盘输出不能直接改变交易参数", doc)
 
     def test_the_layout_is_applied_for_both_slots(self):
         SIE.compose_evolution_prompts(self._trades(1.0))

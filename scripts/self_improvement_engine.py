@@ -53,26 +53,53 @@ from r20_gateway.telemetry import ModelCallTelemetry
 # EVOLUTION_SYSTEM_PROMPT` 式的引用与既有测试都按门面名解析，故门面必须继续提供。
 # ⚠️ 注意：`SNAPSHOT_MAX_STALE_SECONDS` / `SIDE_ALIASES` **留在本文件** ——
 # 它们属于 join 侧（`_match_snapshot`），不属于可观测性判定。
-from scripts.evolution.memory_review import apply_memory_review
+from scripts.evolution.memory_review import apply_memory_review, evaluate_rule_proposals
 from scripts.evolution.review_context import (
     build_host_constitution,
+    build_host_constitution_v2,
+    independent_sample_groups,
+    normalize_asset_multiplier_proposals,
     normalize_asset_multipliers,
+    parse_review_contract,
     parse_review_json,
     summarize_closed_trades,
+    summarize_evidence_stats,
 )
-from scripts.evolution.report import build_evolution_report
+from scripts.evolution.report import build_evolution_report, build_evolution_report_v2
 from scripts.evolution.observability import (  # noqa: E402,F401
     DYNAMICS_FIELDS,
     DYNAMICS_OBSERVED_MIN,
     _parse_bj,
     audit_snapshot_observability,
+    audit_snapshot_sources,
     classify_snapshot_observability,
+    classify_strategy_snapshot,
+    detect_reused_snapshots,
     prune_snapshot,
     render_observability_brief,
+    strategy_evidence_status,
 )
 from llm_credentials import get_cpa_client_config as _get_cpa_client_config  # noqa: E402
+try:  # 稳定 reason code（规划文档 §8.3）
+    from scripts.evolution.reasons import (ASSET_MULTIPLIER_APPLIED, ASSET_MULTIPLIER_EXPIRED,
+                                           ASSET_MULTIPLIER_INVALID, MEMORY_BASELINE_MISMATCH,
+                                           MEMORY_PUBLISH_REJECTED, RULE_PROPOSAL_OBSERVATION_ONLY,
+                                           RULE_PROPOSAL_REQUIRES_APPROVAL, SNAPSHOT_REUSED,
+                                           SNAPSHOT_TIME_UNVERIFIED)
+except ImportError:  # pragma: no cover
+    from evolution.reasons import (ASSET_MULTIPLIER_APPLIED, ASSET_MULTIPLIER_EXPIRED,
+                                   ASSET_MULTIPLIER_INVALID, MEMORY_BASELINE_MISMATCH,
+                                   MEMORY_PUBLISH_REJECTED, RULE_PROPOSAL_OBSERVATION_ONLY,
+                                   RULE_PROPOSAL_REQUIRES_APPROVAL, SNAPSHOT_REUSED,
+                                   SNAPSHOT_TIME_UNVERIFIED)
+
 from r20_backend.math_utils import clamp as _clamp
 TARGET_INSTRUMENTS = [item["name"] for item in load_instruments()]
+
+#: 资产乘数有效期（规划文档 §5.6：7 天 TTL 后自动回到 1.0）。
+ASSET_MULTIPLIER_TTL_DAYS = 7
+#: 证据策略版本（进策略快照/报告/资产乘数写盘）。
+EVIDENCE_POLICY_VERSION = "2"
 
 def atomic_write_json(path: str, payload: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -222,11 +249,25 @@ def _match_snapshot(journal_by_inst, inst, open_time, side=None):
     3. 禁止远期未来快照——开仓 20 分钟之后的快照绝非开仓因果现场，一律返回 None；
     4. 禁止过期证据——快照早于开仓超过 SNAPSHOT_MAX_STALE_SECONDS 即非本次开仓
        的因果现场，弃用。
+
+    实现已收敛到 `_match_snapshot_record`（同一套铁律），本函数只回传 snapshot 本体
+    以保持历史契约。
+    """
+    record, _delta = _match_snapshot_record(journal_by_inst, inst, open_time, side)
+    return (record or {}).get("snapshot")
+
+
+def _match_snapshot_record(journal_by_inst, inst, open_time, side=None):
+    """与 `_match_snapshot` 同一套 join 铁律，但**连记录一起返回**。
+
+    记录里的 `entryTime` / `side` 是宿主可验证的时间证据，分类器需要它们；
+    旧 `_match_snapshot` 只回传 snapshot 本体（既有测试按其契约断言）。
+    返回 `(record, delta_seconds)`；无匹配时 `({}, None)`。
     """
     candidates = journal_by_inst.get(inst) or []
     open_dt = _parse_bj(open_time)
     if not candidates or open_dt is None:
-        return None
+        return {}, None
     wanted_side = SIDE_ALIASES.get(str(side or "").strip())
     best_diff, best_rec = None, None
     for rec in candidates:
@@ -242,7 +283,105 @@ def _match_snapshot(journal_by_inst, inst, open_time, side=None):
         abs_diff = abs(delta_sec)
         if best_diff is None or abs_diff < best_diff:
             best_diff, best_rec = abs_diff, rec
-    return (best_rec or {}).get("snapshot")
+    if best_rec is None:
+        return {}, None
+    return best_rec, (best_diff if best_diff is None else
+                      (_parse_bj(best_rec.get("entryTime")) - open_dt).total_seconds())
+
+
+def _untimed_calculus_fallback(inst, t):
+    """全局 `calculus_snapshot.json` 最后兵：**无交易时间戳，不能当因果证据**（§2.2）。
+
+    旧实现拿它建一个字段完整的 snapshot 并当成 DYNAMICS_OBSERVED/STRATEGY_*，
+    等于用「当前指标」冒充「开仓时刻指标」。现在只作为普通观察返回，
+    由 `_resolve_trade_evidence` 强制降到 PRICE_ONLY / NONE。
+    """
+    calc_file = os.path.join(DATA_DIR, "calculus_snapshot.json")
+    if not os.path.exists(calc_file):
+        return None
+    try:
+        with open(calc_file, "r", encoding="utf-8") as f_calc:
+            calc_data = json.load(f_calc)
+        for item in calc_data.get("instruments", []):
+            if item.get("name") == inst or item.get("instId") in (inst, f"{inst}-USDT-SWAP"):
+                from scripts.trader.signal_snapshot import build_signal_snapshot
+                f_mock = {
+                    "name": inst,
+                    "instId": f"{inst}-USDT-SWAP",
+                    "price": float(t.get("open_px") or t.get("close_px") or 0.0),
+                    "atr": 0.0,
+                    "calculus": item.get("calculus", {}),
+                }
+                return build_signal_snapshot(f_mock, data_dir=DATA_DIR)
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_trade_evidence(t, inst, raw_side, journal_by_inst):
+    """逐单解析证据：来源、时间证明、策略版本、可观测性等级（规划文档 §3.4/§3.5）。
+
+    返回 `{view, stored, source, time_verified, delta, reason_codes, observability,
+    strategy_complete}`：`view` 是**宿主补全上下文后的判定视图**（只用于分类/审计），
+    `stored` 是 journal/台账里**实际记录的快照本体**（不把宿主注入当成新证据）。
+
+    规则：
+
+    - 台账自带 `signal_snapshot`（建仓时写入）⇒ `direct_signal_journal`，可信；
+    - 否则按方向/时间就近 join journal ⇒ `matched_signal_journal`，可信，
+      并记录时间差；
+    - 否则全局 calculus fallback ⇒ `calculus_snapshot_fallback`，**无时间证明**，
+      只能 PRICE_ONLY / NONE；
+    - 都没有 ⇒ `unavailable`。
+    """
+    reason_codes: List[str] = []
+    matched = None
+    direct = t.get("signal_snapshot")
+    if direct:
+        source, snap, delta = "direct_signal_journal", direct, None
+    else:
+        record, delta = _match_snapshot_record(journal_by_inst, inst, t.get("open_time"), raw_side)
+        snap = (record or {}).get("snapshot")
+        if snap:
+            source = "matched_signal_journal"
+            matched = record
+        else:
+            snap = _untimed_calculus_fallback(inst, t)
+            source = "calculus_snapshot_fallback" if snap else "unavailable"
+            delta = None
+
+    result = {"view": None, "stored": None, "source": source, "time_verified": False,
+              "delta": delta, "reason_codes": reason_codes, "observability": "NONE",
+              "strategy_complete": False}
+    if not isinstance(snap, dict) or not snap:
+        return result
+    result["stored"] = dict(snap)
+
+    # 宿主已知的上下文补进**视图**（不改写 journal 本体）：方向/时间/关联 ID
+    view = dict(snap)
+    view.setdefault("instId", f"{inst}-USDT-SWAP")
+    if raw_side and not view.get("side"):
+        view["side"] = SIDE_ALIASES.get(str(raw_side).strip(), None)
+    if matched and not view.get("signal_time"):
+        view["signal_time"] = matched.get("entryTime")
+    if t.get("open_time") and not view.get("open_time"):
+        view["open_time"] = t.get("open_time")
+    if not view.get("venue"):
+        view["venue"] = str(t.get("venue") or "okx").strip().lower() or "okx"
+    if not view.get("strategy_version"):
+        view["strategy_version"] = str(t.get("strategy_rule_version") or "")
+
+    tag = classify_strategy_snapshot(view)
+    status = strategy_evidence_status(view)
+    time_verified = bool(status["time_verified"])
+    if source == "calculus_snapshot_fallback":
+        # §2.2：无时间证明的 fallback 不得因字段完整而升级。
+        tag = "PRICE_ONLY" if prune_snapshot(view) else "NONE"
+        time_verified = False
+        reason_codes.append(SNAPSHOT_TIME_UNVERIFIED)
+    result.update({"view": view, "time_verified": time_verified, "observability": tag,
+                   "strategy_complete": bool(status["complete"])})
+    return result
 
 
 def load_closed_trades(start_time_override: str | None = None):
@@ -296,30 +435,10 @@ def load_closed_trades(start_time_override: str | None = None):
                     reason = str(t.get("exit_reason") or t.get("remark") or "")
 
                     # join 铁律：方向一致、非未来、非过期；宿主逐单标注可观测性
+                    # （规划文档 Task 2：来源 + 时间证明 + 策略版本 + 证据等级）
                     raw_side = str(t.get("side") or t.get("direction") or "")
-                    snap = t.get("signal_snapshot") or _match_snapshot(
-                        journal_by_inst, inst, t.get("open_time"), raw_side)
-                    if not snap:
-                        calc_file = os.path.join(DATA_DIR, "calculus_snapshot.json")
-                        if os.path.exists(calc_file):
-                            try:
-                                with open(calc_file, "r", encoding="utf-8") as f_calc:
-                                    calc_data = json.load(f_calc)
-                                    for item in calc_data.get("instruments", []):
-                                        if item.get("name") == inst or item.get("instId") in (inst, f"{inst}-USDT-SWAP"):
-                                            from scripts.trader.signal_snapshot import build_signal_snapshot
-                                            f_mock = {
-                                                "name": inst,
-                                                "instId": f"{inst}-USDT-SWAP",
-                                                "price": float(t.get("open_px") or t.get("close_px") or 0.0),
-                                                "atr": 0.0,
-                                                "calculus": item.get("calculus", {})
-                                            }
-                                            snap = build_signal_snapshot(f_mock, data_dir=DATA_DIR)
-                                            break
-                            except Exception:
-                                pass
-                    observability = classify_snapshot_observability(snap)
+                    evidence = _resolve_trade_evidence(t, inst, raw_side, journal_by_inst)
+                    snap = evidence["stored"]
                     closed_trades.append({
                         "inst": inst,
                         # 逐单交易所归属（2026-09-23）：此前不带 venue，复盘提示词里既无
@@ -332,9 +451,28 @@ def load_closed_trades(start_time_override: str | None = None):
                         "margin": t.get("margin", "--"),
                         "gross_pnl": round(gross, 2),
                         "fee": round(fee, 2),
+                        "funding": round(float(t.get("funding") or 0.0), 4),
+                        "slippage_estimate": t.get("slippage_estimate"),
+                        "protection_failed": bool(t.get("protection_failed", False)),
                         "net_pnl": round(pnl, 2),
                         "exit_reason": reason,
-                        "snapshot_observability": observability,
+                        "snapshot_observability": evidence["observability"],
+                        "snapshot_source": evidence["source"],
+                        "snapshot_time_verified": bool(evidence["time_verified"]),
+                        "snapshot_time_delta_seconds": evidence["delta"],
+                        "snapshot_reason_codes": list(evidence["reason_codes"]),
+                        "snapshot_strategy_complete": bool(evidence["strategy_complete"]),
+                        "strategy_version": str(t.get("strategy_rule_version")
+                                              or (snap or {}).get("strategy_version") or ""),
+                        "strategy_mode": str(t.get("strategy_mode")
+                                             or (snap or {}).get("strategy_mode") or ""),
+                        "policy_hash": str(t.get("policy_hash") or (snap or {}).get("policy_hash") or ""),
+                        "signal_id": str(t.get("signal_id") or t.get("intent_id") or ""),
+                        # 影子规则报告（§12.4 阶段 C）要按 15M 指标复算门禁；
+                        # 指标只从**开仓快照**取，取不到就是 None（下游 fail-closed 如实报缺）。
+                        "rsi_15m": (snap or {}).get("rsi_15m", (snap or {}).get("rsi")),
+                        "jerk_15m": (snap or {}).get("jerk_15m", (snap or {}).get("jerk")),
+                        "regime": (snap or {}).get("regime"),
                         "entry_snapshot": prune_snapshot(snap),
                     })
         except Exception as e:
@@ -345,21 +483,43 @@ def load_closed_trades(start_time_override: str | None = None):
 EVOLUTION_SYSTEM_PROMPT = """你是 R20 Quantum Trader 的首席投资官，负责基于真实已平仓交易证据进行认知复盘。模型只输出严格 JSON；宿主程序负责北京时间戳与 Markdown 渲染。
 
 【证据纪律】
-1. 只允许根据输入台账中真实可见的字段归因；不得把盈亏结果倒推成未提供的微积分、定积分、概率、新闻或聪明钱事实。
-2. 宿主已逐单标注 snapshot_observability 并前置注入确定性可观测性审计（非模型推断）：仅 DYNAMICS_OBSERVED 可对该单全链路数理归因，PARTIAL 只允许引用其 entry_snapshot 中实际非空的字段；PRICE_ONLY / NONE 一律按「数理快照不可观测」处理，严禁对 v/a/j/I、energy_integral、deviation_area_integral、延续/击穿概率、VaR/CVaR 作任何因果陈述或假设性归因，不得编造；缺失本身不得被解读成「动力学异常」等证据。
-3. 单笔交易或小样本通常不足以证伪长期规律。证据不足时允许 NO_CHANGE，禁止为了每日报告强行制造新心法。
-4. 长期记忆只是软启发式，永远不得弱化数据有效性、4H 方向否决、R:R、ATR、杠杆、保证金、OCO、禁止逆势补仓或 JSON 契约等硬风控。
-5. 同时审查盈利与亏损、手续费、仓位规模、退出原因和反例；区分已验证事实、待验证假设与随机波动。
-6. 基准心法（is_baseline）属宪法级记忆：你的输出只能新增或限定，不能物理删除；宿主会把清单中被省略的基准心法原样补回并留痕。若你依据充分反例认定某条基准已失效，写入 diagnosis_insights 交人工复核，而不是从 ai_long_term_memory 中静默删掉它。
+1. 先报告**事实**（台账字段可直接读出），再报告**假设**（解释），最后才报告**规则提案**；三层不得混写。
+2. 只允许根据输入台账中真实可见的字段归因；不得把盈亏结果倒推成未提供的微积分、定积分、概率、新闻或聪明钱事实。
+3. 宿主已逐单标注 snapshot_observability / snapshot_source / snapshot_time_verified 并前置注入确定性审计（非模型推断）：仅 STRATEGY_OBSERVED / DYNAMICS_OBSERVED 可做对应链路的因果归因；STRATEGY_PARTIAL / PARTIAL 只允许引用 entry_snapshot 中实际非空的字段；PRICE_ONLY / NONE、以及未通过时间验证的 calculus_snapshot_fallback，一律按「数理快照不可观测」处理，严禁对 v/a/j/I、energy_integral、deviation_area_integral、延续/击穿概率、VaR/CVaR 作任何因果陈述或假设性归因，不得编造。
+4. 失败与反例必须与正例一起报告：只报盈利样本的结论视为证据不足（NO_CHANGE / OBSERVATION_ONLY）。
+5. 单一信号拆成多笔订单只能算**一个独立样本组**；同一标的同一时段的多笔同向单也不得当成多个独立样本。
+6. 每条结论必须标明适用范围：策略模式、周期、方向、交易所与样本窗口（scope 字段）。
+7. 不得使用「证明正期望」「完全由」「彻底隔绝」「锁死胜率」等绝对表述，除非它描述的是**代码行为事实**（例如「当前策略版本冻结了 0.8×ATR 保本移损」）。
+8. 不得把软启发式写成硬规则，也不得把建议写成「当前硬规则已生效」。
+9. 不得直接生成或修改 baseline（is_baseline 只能来自代码 manifest），不得修改杠杆、保证金、熔断、止损与持仓上限。
+10. 证据不足时输出 NO_CHANGE 或把提案降级为 OBSERVATION_ONLY。
+
+【三层输出契约】
+- `facts`：可直接从台账读出的事实（带 evidence_ids / evidence_level=OBSERVED / sample_size / independent_sample_groups）；
+- `hypotheses`：待验证解释（带 evidence_ids / counterexample_count / scope）；
+- `rule_proposals`：希望引入的规则提案（带 rule_id / text / scope / requested_level / requires_approval / evidence_ids / counterexample_count / counterexamples_checked）。
+  提案**不会**直接生效：宿主会按「≥2 个独立样本组 + ≥2 个独立时间窗口 + 反例检查 + 不得与硬规则冲突 + 必须声明 scope」逐条闸门，不合格者降级为待验证观察，触碰硬规则或声称基线失效者进入人工审批队列。
 
 【记忆更新规则】
 - ADD：多个独立样本支持新的可复用经验。
 - REVISE：新证据明确限定旧经验的适用条件。
-- INVALIDATE：充分反例证明旧经验失效。
+- INVALIDATE：充分反例证明旧经验失效（仍不得物理删除基线）。
 - NO_CHANGE：证据不足、无新增交易或结论无法区分策略问题与随机性。
+- `ai_long_term_memory` 仍需给出生效后的完整清单（含全部现有基准心法），宿主会把省略的基准原样补回并留痕。
 - 输出 0~4 条结论即可；没有高质量新证据时宁可空数组，不得凑数。
 
-必须输出严格 JSON 对象，不得输出 Markdown、代码围栏或额外解释。
+必须输出严格 JSON 对象，不得输出 Markdown、代码围栏或额外解释。建议结构：
+{
+  "change_status": "NO_CHANGE" | "ADD" | "REVISE" | "INVALIDATE",
+  "facts": [{"text": "...", "evidence_ids": ["trade:0"], "evidence_level": "OBSERVED", "sample_size": 12, "independent_sample_groups": 4}],
+  "hypotheses": [{"text": "...", "evidence_ids": [], "counterexample_count": 3, "scope": {"strategy_modes": ["trend_following"], "timeframes": ["15m"]}}],
+  "rule_proposals": [{"rule_id": "anti_extreme_chase", "text": "...", "scope": {"strategy_modes": ["trend_following"], "directions": ["long"]}, "requested_level": "REVIEWED_HEURISTIC", "requires_approval": false, "evidence_ids": [], "counterexample_count": 0, "counterexamples_checked": true}],
+  "diagnosis_insights": ["0~4 条诊断（兼容字段，可与 facts 同源）"],
+  "evolution_actions": ["0~4 条建议动作（兼容字段）"],
+  "asset_multipliers": {"BTC": 1.0},
+  "ai_long_term_memory": ["生效后的完整心法清单"],
+  "memory_overwrites_reason": "说明证据支持何种变更；NO_CHANGE 时明确为何不覆盖旧记忆"
+}
 """
 
 def resolve_memory_update(change_status: str, proposed_memory: Any, existing_memory: List[str]) -> Tuple[str, List[str], bool]:
@@ -402,7 +562,16 @@ def merge_memory_with_constitution(change_status: str, proposed_texts: List[str]
     return final + readded, readded
 
 
-def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memory_md: str = "", timestamp_str: str = "") -> Tuple[str, str, str, Dict[str, int]]:
+def ledger_revision_of(closed_trades: List[Dict[str, Any]]) -> str:
+    """台账 revision（与报告/提示词/资产乘数共用同一口径）。"""
+    return hashlib.sha256(
+        json.dumps(closed_trades, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memory_md: str = "", timestamp_str: str = "",
+                              baseline_consistency: Optional[Dict[str, Any]] = None,
+                              rule_versions: Optional[Dict[str, Any]] = None) -> Tuple[str, str, str, Dict[str, int]]:
     """组装自进化 System/User 提示词，并前置注入宿主确定性数理快照可观测性审计。
 
     返回 (system, user, now_bj_str, snapshot_audit)。审计由宿主统计而非模型自数
@@ -422,6 +591,35 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
         v_counts[v] = v_counts.get(v, 0) + 1
     venue_summary = ", ".join(f"{v}: {c}笔" for v, c in sorted(v_counts.items())) if v_counts else "无"
 
+    # 宿主确定性证据统计（§4.2-3 / §12.2）：来源分布、独立样本组、策略版本、成本。
+    ledger_revision = ledger_revision_of(closed_trades)
+    try:
+        evidence_stats = summarize_evidence_stats(
+            closed_trades=closed_trades,
+            audit_snapshot_sources=audit_snapshot_sources,
+            detect_reused_snapshots=detect_reused_snapshots,
+            baseline_consistency=baseline_consistency or {})
+    except Exception as exc:  # 统计不可得不得阻断复盘（prompt 会明说缺失）
+        log_msg(f"证据统计不可用: {exc}")
+        evidence_stats = {"error": str(exc)[:160]}
+    source_line = "；".join(f"{k}={v}" for k, v in (evidence_stats.get("snapshot_sources") or {}).items())
+    version_line = "；".join(f"{k}={v}" for k, v in (evidence_stats.get("strategy_versions") or {}).items())
+    cost_line = (f"毛盈亏 {evidence_stats.get('gross_pnl', '--')} / 净盈亏 {evidence_stats.get('net_pnl', '--')} / "
+                 f"手续费 {evidence_stats.get('fees', '--')} / 资金费 {evidence_stats.get('funding', '--')} / "
+                 f"滑点 {evidence_stats.get('slippage', '--')} / 保护失败 {evidence_stats.get('protection_failures', '--')} 次")
+    version_block = rule_versions or {}
+    evidence_block = (
+        "【宿主证据统计（确定性，非模型推断）】:\n"
+        f"- 台账 revision: {ledger_revision}\n"
+        f"- 快照来源分布: {source_line or '无'}\n"
+        f"- 独立样本组: {evidence_stats.get('independent_sample_groups', '--')} 组"
+        f"（同一信号拆单只算一组）| 重复信号证据组: {len(evidence_stats.get('duplicated_signal_groups') or [])}\n"
+        f"- 策略版本分布: {version_line or '无'}\n"
+        f"- 成本与保护: {cost_line}\n"
+        f"- 当前执行规则: {version_block.get('rule_set') or 'legacy@1'} / "
+        f"rule_set_hash {version_block.get('rule_set_hash') or '--'} / baseline hash {version_block.get('baseline_hash') or '--'}\n"
+    )
+
     memory_context = f"""======================= 【当前系统已有的历史长期记忆库】 =======================
 {existing_memory_md.strip()}
 """ if existing_memory_md.strip() else "当前长期记忆库为空 (系统初始冷启动状态)"
@@ -432,6 +630,7 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
 {memory_context}
 
 ======================= 【R20 加密量化实盘战绩与历史交易台账】 =======================
+{evidence_block}
 【统计汇总】:
 - 总平仓笔数: {total} 笔 (胜 {len(wins)} / 负 {len(losses)} | 胜率: {win_rate}%)
 - 累计净盈亏: {total_net:+.2f} USDT | 累计手续费消耗: {total_fees:.2f} USDT
@@ -441,11 +640,20 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
 {json.dumps(closed_trades, indent=2, ensure_ascii=False)}
 
 【复盘与长期记忆进化任务】:
-请严格基于可观测台账证据复盘。以宿主注入的「数理快照可观测性审计」为准：对 PRICE_ONLY / NONE 的交易不得输出任何数理因果，只能标注“数理快照不可观测”。证据不足时使用 NO_CHANGE，不得强行生成新规律。输出标准 JSON：
+请按「事实 → 假设 → 提案」三层复盘，严格基于可观测台账证据。以宿主注入的「数理快照可观测性审计」为准：对 PRICE_ONLY / NONE 或 snapshot_time_verified=false 的交易不得输出任何数理因果，只能标注“数理快照不可观测”。单一信号拆成多笔订单只算一个独立样本组；反例必须与正例一起报告；每条结论必须带 scope。证据不足时使用 NO_CHANGE 或 OBSERVATION_ONLY，不得强行生成新规律。输出标准 JSON：
 {{
   "change_status": "NO_CHANGE" | "ADD" | "REVISE" | "INVALIDATE",
+  "facts": [
+    {{"text": "可从台账直接读出的事实", "evidence_ids": ["trade:0"], "evidence_level": "OBSERVED", "sample_size": 0, "independent_sample_groups": 0}}
+  ],
+  "hypotheses": [
+    {{"text": "待验证解释", "evidence_ids": [], "counterexample_count": 0, "scope": {{"strategy_modes": [], "timeframes": []}}}}
+  ],
+  "rule_proposals": [
+    {{"rule_id": "...", "text": "建议规则文本", "scope": {{"strategy_modes": [], "directions": []}}, "requested_level": "REVIEWED_HEURISTIC", "requires_approval": false, "evidence_ids": [], "counterexample_count": 0, "counterexamples_checked": true}}
+  ],
   "diagnosis_insights": [
-    "0~4 条有台账字段支持的诊断；区分已验证事实与待验证假设"
+    "0~4 条有台账字段支持的诊断（兼容字段）"
   ],
   "evolution_actions": [
     "0~4 条可执行改进；证据不足时只提出数据采集或观察建议"
@@ -453,6 +661,7 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
   "ai_long_term_memory": [
     "生效后的完整心法清单：必须原样包含现有全部基准心法（宿主会把省略的基准补回并留痕），新增条目须有多个独立样本支持；不得覆盖任何硬风控"
   ],
+  "asset_multipliers": {{"BTC": 1.0}},
   "memory_overwrites_reason": "说明证据支持何种变更；NO_CHANGE 时明确为何不覆盖旧记忆"
 }}
 """
@@ -487,20 +696,29 @@ def compose_evolution_prompts(closed_trades: List[Dict[str, Any]], existing_memo
     host_constitution = host_constitution + (
         f"5. 交易所分布（宿主确定性统计，非模型推断）：{venue_summary}。\n"
     )
+    # 规划文档 §4.4-2 / §6.1：v1 四条硬约束之后续写「无时间证明不得作因果证据、
+    # 拆单不算独立样本、资产乘数不是硬风控、复盘不能直接改交易参数、baseline 异常
+    # 只出报告」五条。续篇单独成函数，v1 逐字不动（AST 对拍门）。
+    host_constitution = host_constitution + build_host_constitution_v2(
+        observability_brief=observability_brief, evidence_stats=evidence_stats,
+        baseline_consistency=baseline_consistency, rule_versions=rule_versions)
     effective_evolution_system = effective_evolution_system.rstrip() + host_constitution
     effective_evolution_user = effective_evolution_user.rstrip() + host_constitution
     return effective_evolution_system, effective_evolution_user, now_bj_str, snapshot_audit
 
 
 def call_llm_evolution_review(closed_trades: List[Dict[str, Any]], existing_memory_md: str = "", timestamp_str: str = "",
-                              model_override: Optional[str] = None) -> Dict[str, Any]:
+                              model_override: Optional[str] = None,
+                              baseline_consistency: Optional[Dict[str, Any]] = None,
+                              rule_versions: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     base_url, api_key = get_cpa_client_config()
     if not api_key:
         log_msg("[AI Evolution] Error: CPA API Key not found, using fallback heuristics.")
         return {}
 
     effective_evolution_system, effective_evolution_user, now_bj_str, _audit = compose_evolution_prompts(
-        closed_trades, existing_memory_md=existing_memory_md, timestamp_str=timestamp_str)
+        closed_trades, existing_memory_md=existing_memory_md, timestamp_str=timestamp_str,
+        baseline_consistency=baseline_consistency, rule_versions=rule_versions)
     try:
         snapshot = f"【SYSTEM PROMPT】:\n{effective_evolution_system.strip()}\n\n{'='*70}\n【USER PROMPT ({now_bj_str})】：\n{effective_evolution_user.strip()}"
         fd, temp_path = tempfile.mkstemp(prefix=".evolution-prompt-", suffix=".tmp", dir=DATA_DIR)
@@ -668,6 +886,45 @@ def run_self_evolution(force: bool = False):
     memory_snapshot, existing_memory_md, existing_core_lessons = memory_service.read_trading_context(
         AI_MEMORY_MD_FILE, AI_MEMORY_FILE)
 
+    # 执行规则版本（代码事实）：进提示词宪章与报告，供模型知道“当前硬规则是什么”。
+    try:
+        from scripts.strategy_rules import active_execution_policy, rule_set_hash, strategy_rule_version
+        _policy = active_execution_policy()
+        rule_versions = {"rule_set": _policy["rule_set"],
+                         "rule_set_hash": rule_set_hash(_policy["rule_set"]),
+                         "strategy_rule_version": strategy_rule_version(_policy["rule_set"]),
+                         "mode": _policy["mode"],
+                         "baseline_hash": memory_service.baseline_manifest_hash()}
+    except Exception as exc:
+        log_msg(f"执行规则版本解析失败（按 unknown 注入）: {exc}")
+        rule_versions = {"rule_set": "unknown", "baseline_hash": memory_service.baseline_manifest_hash()}
+
+    # 基准一致性（§3.2）：发布前检查。
+    #
+    # 两种口径分开：`baseline_consistency` 是**权威现状**（面板/报告要看见 CRITICAL），
+    # `baseline_publish_ok` 是**发布路径修复后**的结果 —— `publish_review` 会先把
+    # 缺失/偏离的代码基准合并回来（§4.1-3），所以「权威缺基线」不会把首次自举锁死，
+    # 真正的硬阻断留给修复后仍不一致的状态。
+    baseline_consistency = memory_service.check_baseline_consistency(
+        memory_snapshot.get("lessons") or [])
+    _repaired_lessons, _merge_report = memory_service.merge_code_baselines(
+        memory_snapshot.get("lessons") or [])
+    baseline_after_merge = memory_service.check_baseline_consistency(_repaired_lessons)
+    if not baseline_consistency["healthy"]:
+        log_msg(f"🛠️ {MEMORY_BASELINE_MISMATCH}: 权威基准与代码 manifest 不一致 "
+                f"missing={baseline_consistency['missing_ids']} "
+                f"mismatched={baseline_consistency['mismatched_ids']} "
+                f"unexpected={baseline_consistency['unexpected_ids']}；"
+                f"发布路径将补回（repair_planned={bool(_merge_report['added_ids'] or _merge_report['repaired_ids'] or _merge_report['demoted_ids'])}）")
+    if not baseline_after_merge["healthy"]:
+        log_msg(f"🚨 {MEMORY_BASELINE_MISMATCH}: 合并代码基准后仍不一致，本周期停止发布，"
+                "交易继续使用代码硬规则")
+    evidence_stats = summarize_evidence_stats(
+        closed_trades=closed_trades,
+        audit_snapshot_sources=audit_snapshot_sources,
+        detect_reused_snapshots=detect_reused_snapshots,
+        baseline_consistency=baseline_consistency)
+
     # 宿主确定性数理快照可观测性审计（写进报告，结论不依赖模型自数 null）
     snapshot_audit = audit_snapshot_observability(closed_trades)
     constitution_readded: List[str] = []
@@ -679,7 +936,9 @@ def run_self_evolution(force: bool = False):
     # 徒耗一池模型调用；本周期照常落 NO_CHANGE + 错误透传）。
     EVOLUTION_FALLBACK_BUDGET_SECONDS = 400.0
     cycle_t0 = time.time()
-    llm_review = call_llm_evolution_review(closed_trades, existing_memory_md=existing_memory_md, timestamp_str=timestamp_str)
+    llm_review = call_llm_evolution_review(closed_trades, existing_memory_md=existing_memory_md, timestamp_str=timestamp_str,
+                                          baseline_consistency=baseline_consistency,
+                                          rule_versions=rule_versions)
     if not isinstance(llm_review, dict):
         llm_review = {}
     # 复盘专属单次回退（2026-09-10）：qwen3.8-flash 网关 504 曾连续吞掉 09-09 与
@@ -699,25 +958,97 @@ def run_self_evolution(force: bool = False):
                 llm_review = fb_review
                 log_msg(f"✅ 回退模型 {fallback_model} 复盘完成（仅本周期；不改全局激活位）")
 
-    change_status, _, _ = resolve_memory_update(llm_review.get("change_status", "NO_CHANGE"), [], [])
-    insights = llm_review.get("diagnosis_insights", [])
-    actions_taken = llm_review.get("evolution_actions", [])
-    if not isinstance(insights, list):
-        insights = []
-    if not isinstance(actions_taken, list):
-        actions_taken = []
+    # ── 证据纪律与权限分层（规划文档 §3.2 / §4.2 / §4.5 / §6）───────────────
+    llm_failed = bool(llm_review.get("__llm_error__"))
+    review_contract = parse_review_contract(llm_review=llm_review)
+    baseline_hash = memory_service.baseline_manifest_hash()
+    if not baseline_consistency["healthy"]:
+        log_msg(f"🚨 {MEMORY_BASELINE_MISMATCH}: 基准心法与代码 manifest 不一致 "
+                f"missing={baseline_consistency['missing_ids']} "
+                f"mismatched={baseline_consistency['mismatched_ids']} "
+                f"unexpected={baseline_consistency['unexpected_ids']}；"
+                "本周期停止发布，交易继续使用代码硬规则")
+    if llm_failed:
+        log_msg(f"🧯 LLM 复盘失败（{str(llm_review.get('__llm_error__'))[:120]}）："
+                "只写失败报告，不生成任何新规则")
+    publish_allowed = bool(baseline_after_merge["healthy"]) and not llm_failed
+    policy_hash = str(memory_snapshot.get("version") or "")  # 兼容：真实 policy hash 来自策略快照
+    try:
+        from policy_snapshot import generate_policy_snapshot
+        policy_hash = str(generate_policy_snapshot().get("policy_hash") or policy_hash)
+    except Exception:
+        pass
+
+    change_status = review_contract["change_status"] if publish_allowed else "NO_CHANGE"
+    insights, actions_taken = [], []
+    facts = review_contract.get("facts") or []
+    hypotheses = review_contract.get("hypotheses") or []
+    for row in facts:
+        text = _coerce_display_str(row)
+        if text:
+            insights.append(text)
+    for row in hypotheses:
+        text = _coerce_display_str(row)
+        if text:
+            actions_taken.append(text)
+    # 兼容旧契约：模型仍可能只输出 diagnosis_insights / evolution_actions。
+    legacy_insights = llm_review.get("diagnosis_insights", [])
+    legacy_actions = llm_review.get("evolution_actions", [])
+    if not isinstance(legacy_insights, list):
+        legacy_insights = []
+    if not isinstance(legacy_actions, list):
+        legacy_actions = []
     # 模型 schema 漂移归一：部分模型把数组项输出为对象（{dimension, analysis} /
     # {action_type, action}）或自序列化 JSON 字符串；不归一则前端渲染成
     # [object Object] / 原始 JSON（2026-09-09 用户截图）。统一压平成展示字符串。
-    insights = [s for s in (_coerce_display_str(x) for x in insights) if s]
-    actions_taken = [s for s in (_coerce_display_str(x) for x in actions_taken) if s]
-    
-    asset_mults = normalize_asset_multipliers(
+    insights += [s for s in (_coerce_display_str(x) for x in legacy_insights) if s]
+    actions_taken += [s for s in (_coerce_display_str(x) for x in legacy_actions) if s]
+
+    # 规则提案闸门（规划文档 §4.5）：模型只能提交提案，晋级为 L2 需要过独立性/反例/scope。
+    sample_group_count, _sample_groups = independent_sample_groups(closed_trades)
+    proposal_result = evaluate_rule_proposals(
+        rule_proposals=review_contract.get("rule_proposals") or [],
+        closed_trades=closed_trades,
+        audit_structured_lesson=memory_service.audit_structured_lesson,
+        independent_sample_groups=sample_group_count)
+    if not publish_allowed:
+        # 基线不健康 / LLM 失败：提案降级为观察，绝不标记为已生效（§3.2）。
+        proposal_result = dict(proposal_result)
+        proposal_result["observation_only"] = (list(proposal_result["observation_only"])
+                                               + list(proposal_result["accepted"]))
+        proposal_result["accepted"] = []
+    for code in proposal_result["reason_codes"]:
+        log_msg(f"🧾 {code}")
+    if not publish_allowed:
+        log_msg(f"🧾 {MEMORY_PUBLISH_REJECTED}: 本周期不发布记忆"
+                f"（baseline_healthy={baseline_after_merge['healthy']} llm_failed={llm_failed}）")
+    if evidence_stats.get("duplicated_signal_groups"):
+        log_msg(f"🧾 {SNAPSHOT_REUSED}: {len(evidence_stats['duplicated_signal_groups'])} "
+                "组重复信号快照（只作观察，不得当独立样本）")
+
+    # 保留历史调用点（对拍门按名字解析参数）；生效值改用严格契约（§4.4-3 / §5.6）。
+    legacy_asset_mults = normalize_asset_multipliers(
         TARGET_INSTRUMENTS=TARGET_INSTRUMENTS,
         clamp=clamp,
         llm_review=llm_review    )
+    asset_multiplier_result = normalize_asset_multiplier_proposals(
+        llm_review=llm_review, target_instruments=TARGET_INSTRUMENTS)
+    asset_mults = dict(asset_multiplier_result["multipliers"])
+    if not publish_allowed:
+        asset_multiplier_result["status"] = "UNAVAILABLE"
+        asset_mults = {p: 1.0 for p in TARGET_INSTRUMENTS}
+    if asset_mults != legacy_asset_mults:
+        log_msg(f"🛡️ 资产乘数严格契约：{len(asset_multiplier_result['rejected'])} 项被拒绝"
+                "（超出 0.5~1.5 或非标的池资产）")
+
+    proposal_texts = ([p.get("text") for p in proposal_result["accepted"]]
+                      + [p.get("text") for p in proposal_result["observation_only"]])
+    llm_memory_rows = llm_review.get("ai_long_term_memory", [])
+    if not isinstance(llm_memory_rows, list):
+        llm_memory_rows = []
     change_status, long_term_memory, preserve_existing_memory = resolve_memory_update(
-        change_status, llm_review.get("ai_long_term_memory", []), existing_core_lessons
+        change_status, list(llm_memory_rows) + [t for t in proposal_texts if t],
+        existing_core_lessons
     )
 
     retired_lessons: List[str] = []
@@ -733,20 +1064,67 @@ def run_self_evolution(force: bool = False):
         retired_lessons=retired_lessons,
         total_trades=total_trades    )
 
+    # 提案元数据（evidence_level/scope/独立性/反例/审批）在发布后按文本回填；
+    # 发布段被 `apply_memory_review` 的 AST 对拍门钉住，不能在那里加参数。
+    if not preserve_existing_memory and proposal_result.get("metadata"):
+        try:
+            memory_service.annotate_lesson_metadata(
+                proposal_result["metadata"],
+                expected_version=memory_service.read_memory_snapshot()["version"])
+        except Exception as exc:
+            log_msg(f"提案元数据回填失败（保留既定权威）: {exc}")
+
+    # 待审批队列（§4.5-6 / §9.3）：触碰硬规则或声称基线失效的提案只进人工队列，不自动生效。
+    pending_proposals: List[Dict[str, Any]] = []
+    if proposal_result["requires_approval"]:
+        pending_proposals = [dict(p, created_at=timestamp_str,
+                                  status="PENDING_APPROVAL",
+                                  ledger_revision=ledger_revision)
+                             for p in proposal_result["requires_approval"]]
+        try:
+            atomic_write_json(os.path.join(DATA_DIR, "rule_proposals_pending.json"),
+                              {"generated_at": timestamp_str,
+                               "source_ledger_revision": ledger_revision,
+                               "ttl_days": ASSET_MULTIPLIER_TTL_DAYS,
+                               "proposals": pending_proposals})
+            log_msg(f"🧾 {RULE_PROPOSAL_REQUIRES_APPROVAL}: "
+                    f"{len(pending_proposals)} 条提案等待人工审批（不自动生效）")
+        except Exception as exc:
+            log_msg(f"待审批提案写入失败: {exc}")
+
     # Keep the legacy markdown mirror in lock-step with the authority so the
     # public dashboard can never freeze on a hand-edited snapshot.
+    mirror_synced: Optional[bool] = None
     try:
-        if memory_service.sync_markdown_mirror():
+        mirror_synced = bool(memory_service.sync_markdown_mirror())
+        if mirror_synced:
             log_msg("🪞 AI_TRADING_MEMORY.md 已同步至结构化心法权威库")
+        else:
+            log_msg("🪞 Markdown 镜像未生成（结构化权威保留不变）")
     except Exception as exc:
+        mirror_synced = False
         log_msg(f"Markdown mirror sync skipped: {exc}")
 
-    # Persist asset multipliers to data/asset_multipliers.json so brain trader can consume
+    # Persist asset multipliers to data/asset_multipliers.json so brain trader can consume.
+    # 写盘必须带来源/有效期/证据 revision/审批状态（规划文档 §4.2-5 / §5.6）。
     try:
+        expires_at = (now_bj + datetime.timedelta(days=ASSET_MULTIPLIER_TTL_DAYS)).isoformat()
         mults_payload = {
             "timestamp": timestamp_str,
             "multipliers": asset_mults,
             "updated_by": "self_improvement_engine",
+            "source": "self_improvement_review",
+            "status": asset_multiplier_result["status"],
+            "ttl_days": ASSET_MULTIPLIER_TTL_DAYS,
+            "expires_at": expires_at,
+            "source_ledger_revision": ledger_revision,
+            "evidence_policy_version": EVIDENCE_POLICY_VERSION,
+            "allowed_range": asset_multiplier_result["allowed_range"],
+            "rejected": asset_multiplier_result["rejected"],
+            "approval": {"required": asset_multiplier_result["status"] != "REVIEWED",
+                         "status": ("NOT_REQUIRED" if asset_multiplier_result["status"] == "REVIEWED"
+                                    else "PENDING_REVIEW"),
+                         "approved_by": "", "approved_at": ""},
         }
         atomic_write_json(os.path.join(DATA_DIR, "asset_multipliers.json"), mults_payload)
     except Exception as exc:
@@ -771,6 +1149,35 @@ def run_self_evolution(force: bool = False):
         timestamp_str=timestamp_str,
         total_trades=total_trades,
         win_rate=win_rate    )
+
+    # 报告 v2（规划文档 §4.2）：v1 的 18 键不动，只增不改。
+    try:
+        _memory_revision = memory_service.read_memory_snapshot()["version"]
+    except Exception:
+        _memory_revision = "missing"
+    try:
+        _input_hash = hashlib.sha256(Path(EVOLUTION_LAST_PROMPT_FILE).read_bytes()).hexdigest()
+    except Exception:
+        _input_hash = ""
+    _output_hash = hashlib.sha256(
+        json.dumps(llm_review, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+    report_payload = build_evolution_report_v2(
+        report_payload=report_payload,
+        ledger_revision=ledger_revision,
+        memory_revision=_memory_revision,
+        policy_hash=policy_hash,
+        baseline_hash=baseline_hash,
+        baseline_consistency=baseline_consistency,
+        evidence_stats=evidence_stats,
+        review_contract=review_contract,
+        proposal_result=proposal_result,
+        asset_multiplier_status=asset_multiplier_result["status"],
+        review_input_hash=_input_hash,
+        review_output_hash=_output_hash,
+        pending_proposals=pending_proposals,
+        llm_failed=llm_failed,
+        mirror_synced=mirror_synced    )
 
     atomic_write_json(REPORT_JSON_FILE, report_payload)
 

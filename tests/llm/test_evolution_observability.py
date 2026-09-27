@@ -304,7 +304,8 @@ class EngineEndToEndTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = self._env(tmp)
 
-            def fake_review(closed_trades, existing_memory_md="", timestamp_str=""):
+            def fake_review(closed_trades, existing_memory_md="", timestamp_str="",
+                            **kwargs):  # 引擎新增 baseline_consistency / rule_versions 透传
                 return {"change_status": change_status,
                         "diagnosis_insights": ["同向多单同时止损，支持现有基准"],
                         "evolution_actions": [],

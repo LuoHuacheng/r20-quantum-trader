@@ -153,4 +153,9 @@ export const zhAdminPromptStudio = {
   imported: '成功导入策略方案「{name}」！',
   importFailed: '导入失败：{msg}',
   compiledCopied: '编译后实发 Prompt 已复制',
+  // 规划文档 §7.1：执行策略（profile 与代码硬规则的显式绑定）
+  executionPolicy: {
+    label: '执行策略（策略规则集）',
+    hint: '规则集由执行模式派生；未知模式后端会拒绝激活。legacy = 旧规则（不新增门禁）',
+  },
 };

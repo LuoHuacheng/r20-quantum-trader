@@ -21,8 +21,10 @@ from scripts.risk_constants import (
     SCALE_OUT_RATIO,
     SCALE_OUT_TRIGGER_ATR,
     effective_daily_loss_limit,
+    effective_group_risk_cap,
     effective_max_positions,
     effective_single_asset_margin,
+    correlation_group_of,
 )
 
 # 本进程读取单一事实源（= 读一次 .env）的时刻。后台/worker 是长驻进程：改完 .env 后
@@ -151,6 +153,19 @@ _PARAMS: list[dict[str, Any]] = [
      "label": "分批止盈触发门槛", "label_en": "Scale-Out Trigger Threshold",
      "desc": "持仓浮盈达到该倍数 × 1H ATR 时启动分批平仓（通常为 1.0~1.5x ATR）。",
      "type": "float", "min": 0.5, "max": 5.0, "step": 0.1, "unit": "× ATR", "display_scale": 1},
+    # ── 相关标的组同向敞口（规划文档 §5.7；L0/L1，LLM 与记忆文本不得修改）──
+    {"key": "R20_MAX_GROUP_SAME_DIRECTION", "group": "exposure",
+     "label": "相关组同向持仓上限", "label_en": "Max Group Same-Direction Positions",
+     "desc": "同一相关标的组（如 BTC/ETH 或 SOL/DOGE/SUI）内同向持仓笔数上限，防高相关标的共振踩踏。0 = 不额外收紧。",
+     "type": "int", "min": 0, "max": 20, "step": 1, "unit": "仓", "display_scale": 1},
+    {"key": "R20_GROUP_RISK_CAP_RATIO", "group": "exposure",
+     "label": "相关组同向风险额占比", "label_en": "Group Same-Direction Risk Cap Ratio",
+     "desc": "同一相关组同向已有风险额 + 新单风险额，不得超过可用余额的该比例（与绝对封顶取小）。",
+     "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "unit": "× 余额", "display_scale": 100},
+    {"key": "R20_MAX_GROUP_RISK_USDT", "group": "exposure",
+     "label": "相关组同向风险额封顶", "label_en": "Max Group Risk (USDT)",
+     "desc": "同一相关组同向风险额的绝对封顶（USDT，小资金账户按上面的比例自动收紧）。",
+     "type": "float", "min": 0.0, "max": 100000.0, "step": 10.0, "unit": "USDT", "display_scale": 1},
     {"key": "R20_MAX_TAKE_PROFIT_ATR", "group": "exit_strategy",
      "label": "单笔最大止盈宽度 (×ATR)", "label_en": "Max Take-Profit ATR Band",
      "desc": "单笔止盈单距离入场价的最大 ATR 跨度。超出此倍数的止盈单会被执行层平滑收窄钳制，防止止盈目标过远导致行情反转无法落袋。",
@@ -178,6 +193,9 @@ SUITES: list[dict[str, Any]] = [
          "R20_MAX_TOTAL_EXPOSURE_USDT": 600.0,
          "R20_SCALE_OUT_ENABLED": 1, "R20_SCALE_OUT_RATIO": 0.50, "R20_SCALE_OUT_TRIGGER_ATR": 1.00,
          "R20_MAX_TAKE_PROFIT_ATR": 2.80,
+         # §5.7 相关组同向敞口：防守套件收到每相关组 1 仓
+         "R20_MAX_GROUP_SAME_DIRECTION": 1, "R20_GROUP_RISK_CAP_RATIO": 0.03,
+         "R20_MAX_GROUP_RISK_USDT": 150.0,
      }},
     {"id": "balanced", "name": "⚖️ 均衡波段", "tagline": "推荐默认 · 攻守兼备",
      "desc": "系统出厂基线：同向 3 仓防共振踩踏、单笔保证金 20% 硬顶、2% 单笔风险、R:R 底线 2.0、"
@@ -200,6 +218,9 @@ SUITES: list[dict[str, Any]] = [
          "R20_MAX_TOTAL_EXPOSURE_USDT": 3000.0,
          "R20_SCALE_OUT_ENABLED": 1, "R20_SCALE_OUT_RATIO": 0.40, "R20_SCALE_OUT_TRIGGER_ATR": 1.50,
          "R20_MAX_TAKE_PROFIT_ATR": 5.00,
+         # §5.7 相关组同向敞口：进取套件放宽但仍有上限
+         "R20_MAX_GROUP_SAME_DIRECTION": 3, "R20_GROUP_RISK_CAP_RATIO": 0.10,
+         "R20_MAX_GROUP_RISK_USDT": 500.0,
      }},
 ]
 

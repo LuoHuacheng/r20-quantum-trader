@@ -20,6 +20,8 @@ import BaseStat from '../../components/base/BaseStat.vue';
 import BaseEmpty from '../../components/base/BaseEmpty.vue';
 import BaseCollapse from '../../components/base/BaseCollapse.vue';
 import { resolveEvolutionStatus } from '../../utils/evolutionStatus';
+// 规划文档 §9.2：事实/假设/提案三层与证据 hash 走纯逻辑（node 可测）。
+import { summarizeReviewEvidence, summarizeReviewLayers } from '../admin/evolutionMemoryLogic';
 
 const store = useDashboardStore();
 const { t } = useI18n();
@@ -105,6 +107,10 @@ const rules = computed(() => {
 });
 
 const md = computed(() => (store.data as any)?.ai_trading_memory_md || '');
+
+/* §9.2：三层复盘（事实/假设/提案）与证据版本。 */
+const reviewLayers = computed(() => summarizeReviewLayers(review.value, t));
+const reviewEvidence = computed(() => summarizeReviewEvidence(review.value));
 </script>
 
 <template>
@@ -201,6 +207,33 @@ const md = computed(() => (store.data as any)?.ai_trading_memory_md || '');
                   {{ insTitle(it) }}
                 </span>
                 <p class="text-xs text-[var(--ink-1)] leading-body font-sans">{{ insBody(it) }}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 三层复盘：事实 / 假设 / 规则提案（§9.2） -->
+          <div class="dsh-card p-4 space-y-3">
+            <h2 class="text-xs font-bold uppercase tracking-wider text-[var(--ink-strong)] flex items-center gap-1.5">
+              <ShieldCheck class="h-4 w-4 text-[var(--accent)]" />
+              {{ t('dash.evolution.layers.title') }}
+            </h2>
+            <div v-if="reviewEvidence.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              <div v-for="row in reviewEvidence" :key="row.key" class="min-w-0">
+                <span class="text-3xs text-[var(--ink-3)] font-semibold uppercase tracking-wider block">{{ row.key }}</span>
+                <span class="text-xs font-mono text-[var(--ink-1)] break-all">{{ row.value }}</span>
+              </div>
+            </div>
+            <div v-for="layer in reviewLayers" :key="layer.key" class="space-y-1.5">
+              <span class="text-3xs font-bold font-mono text-[var(--accent)] block uppercase">{{ layer.title }}</span>
+              <BaseEmpty v-if="!layer.rows.length" :text="t('dash.evolution.layers.empty')" />
+              <div v-for="(row, idx) in layer.rows" :key="idx" class="dsh-card-sub p-2 space-y-1">
+                <p class="text-xs text-[var(--ink-1)] leading-body font-sans">{{ row.text }}</p>
+                <p class="text-3xs font-mono text-[var(--ink-3)]">
+                  <span v-if="row.evidence_ids?.length">{{ t('dash.evolution.layers.evidence') }} {{ row.evidence_ids.join(', ') }} · </span>
+                  <span v-if="row.independent_sample_groups != null">{{ t('dash.evolution.layers.groups') }} {{ row.independent_sample_groups }} · </span>
+                  <span v-if="row.counterexample_count != null">{{ t('dash.evolution.layers.counterexamples') }} {{ row.counterexample_count }} · </span>
+                  <span v-if="row.requires_approval">{{ t('dash.evolution.layers.requiresApproval') }}</span>
+                </p>
               </div>
             </div>
           </div>

@@ -39,7 +39,9 @@ SUBMODULE = ROOT / "scripts" / "brain" / "decisions.py"
 _IMPL_ONLY_MARKERS = (
     '    lev_hi = max(1, int(round(max_leverage)))',
     '    lev_lo = max(1, min(int(round(min_leverage)), lev_hi))',
-    '        mult_file = os.path.join(data_dir, "asset_multipliers.json")',
+    # 2026-09-27（规划文档 §4.2-7/§5.6）：乘数读取改成带 provenance/TTL 的
+    # `load_asset_multiplier_state`，标记随之换成新实现体的稳定锚点。
+    'def load_asset_multiplier_state(data_dir: str) -> Dict[str, Any]:',
 )
 
 _PKG = {

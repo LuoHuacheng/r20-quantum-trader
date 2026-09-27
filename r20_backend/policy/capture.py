@@ -17,10 +17,12 @@ from typing import Any, Dict, List, Optional
 from r20_backend.policy.fingerprints import (
     extract_council_fingerprint,
     extract_evolution_mind_fingerprint,
+    extract_execution_policy_fingerprint,
     extract_interceptors_fingerprint,
     extract_prompt_profile_fingerprint,
+    extract_risk_config_fingerprint,
 )
-from r20_backend.policy.schema import DEFAULT_BASE_VERSION
+from r20_backend.policy.schema import DEFAULT_BASE_VERSION, EVIDENCE_POLICY_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +36,22 @@ def generate_policy_snapshot(
     council_config: Optional[Dict[str, Any]] = None,
     plugins_dir: Optional[Path] = None,
     base_version: str = DEFAULT_BASE_VERSION,
+    risk_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Generates an immutable snapshot fingerprint across the 4 core strategy units."""
+    """Generates an immutable snapshot fingerprint across the 4 core strategy units.
+
+    2026-09-27（规划文档 §8.1）：额外记录**执行策略**、**记忆 authority/baseline hash
+    与注入条目**、**风险配置 hash**、**证据策略版本**；它们一并进入 canonical
+    fingerprint ⇒ 任一变化都会改 policy_hash（回滚校验因此能区分只差规则的版本）。
+    """
     prompt_info = extract_prompt_profile_fingerprint(root, prompt_profile, root_dir=root_dir)
     evolution_info = extract_evolution_mind_fingerprint(root, memory_snapshot, root_dir=root_dir)
     interceptor_info = extract_interceptors_fingerprint(
         root, interceptor_plugins, plugins_dir=plugins_dir, root_dir=root_dir
     )
     council_info = extract_council_fingerprint(council_config, root_dir=root_dir)
+    execution_info = extract_execution_policy_fingerprint(root, prompt_profile, root_dir=root_dir)
+    risk_info = extract_risk_config_fingerprint(root, risk_config, root_dir=root_dir)
 
     canonical_fingerprint = {
         "prompt_profile": {
@@ -52,6 +62,8 @@ def generate_policy_snapshot(
         "evolution_mind": {
             "version": evolution_info["version"],
             "enabled_count": evolution_info["enabled_count"],
+            "baseline_hash": evolution_info.get("baseline_hash", ""),
+            "injected_lesson_ids": evolution_info.get("injected_lesson_ids", []),
         },
         "physical_interceptors": {
             "plugins_hash": interceptor_info["plugins_hash"],
@@ -63,6 +75,13 @@ def generate_policy_snapshot(
             "active_roles": council_info["active_roles"],
             "role_models": council_info["role_models"],
         },
+        "execution_policy": {
+            "mode": execution_info["mode"],
+            "revision": execution_info["revision"],
+            "rule_set_hash": execution_info["rule_set_hash"],
+        },
+        "risk_config": {"hash": risk_info["hash"]},
+        "evidence_policy_version": EVIDENCE_POLICY_VERSION,
     }
 
     canon_bytes = json.dumps(canonical_fingerprint, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -84,11 +103,26 @@ def generate_policy_snapshot(
         "base_version": base_version,
         "timestamp": int(time.time()),
         "summary": summary,
+        "evidence_policy_version": EVIDENCE_POLICY_VERSION,
+        "execution_policy": {
+            "mode": execution_info["mode"],
+            "revision": execution_info["revision"],
+            "rule_set": execution_info["rule_set"],
+            "rule_set_hash": execution_info["rule_set_hash"],
+        },
+        "memory": {
+            "authority_hash": evolution_info.get("authority_hash", evolution_info["version"]),
+            "baseline_hash": evolution_info.get("baseline_hash", ""),
+            "injected_lesson_ids": evolution_info.get("injected_lesson_ids", []),
+        },
+        "risk_config_hash": risk_info["hash"],
         "units": {
             "prompt_profile": prompt_info,
             "evolution_mind": evolution_info,
             "physical_interceptors": interceptor_info,
             "model_council": council_info,
+            "execution_policy": execution_info,
+            "risk_config": {"hash": risk_info["hash"], "count": risk_info["count"]},
         },
     }
 
@@ -170,7 +204,7 @@ def capture_full_strategy_package(root: Path, root_dir: Optional[Path] = None) -
             except ValueError:
                 pass
 
-    snapshot = generate_policy_snapshot(root, root_dir=r_dir)
+    snapshot = generate_policy_snapshot(root, root_dir=r_dir, risk_config=risk_full)
 
     return {
         "format": "r20_policy_package_v1",

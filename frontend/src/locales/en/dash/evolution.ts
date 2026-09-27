@@ -44,4 +44,16 @@ export const enEvolution = {
   autoIterateBadge: 'Self-rewriting every 6 hours',
   snapshotAuditTitle: 'Deterministic math snapshot audit',
   actText: '[{type}] {text}',
+  // ── Plan §9.2: facts / hypotheses / proposals layers and evidence versions ──
+  layers: {
+    title: 'Three-layer review (facts / hypotheses / proposals)',
+    facts: 'Facts (observable)',
+    hypotheses: 'Hypotheses',
+    proposals: 'Rule proposals',
+    empty: 'No entries this cycle',
+    evidence: 'Evidence',
+    groups: 'Independent groups',
+    counterexamples: 'Counterexamples',
+    requiresApproval: 'Awaiting human approval',
+  },
 };

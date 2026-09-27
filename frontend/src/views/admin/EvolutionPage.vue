@@ -46,6 +46,8 @@ import { Brain, Sparkles, RefreshCw, Clock, Plus, Trash2, Save,
   PlayCircle, BookOpen, Sliders, Terminal, ShieldCheck, RotateCcw,
   Loader2, AlertTriangle } from 'lucide-vue-next';
 import BaseLoadingAnnounce from '../../components/base/BaseLoadingAnnounce.vue';
+// 规划文档 §9.1/§9.3：记忆计数与告警口径抽成纯逻辑（node 可测）。
+import { memoryAlerts, summarizeMemoryInventory } from './evolutionMemoryLogic';
 
 const { api } = useApi();
 const auth = useAuthStore();
@@ -64,6 +66,10 @@ const workingModules = ref<any[]>([]);
 // Structured White-Box Memory state
 const structuredLessons = ref<any[]>([]);
 const memoryVersion = ref<string | null>(null);
+// /api/v1/admin/memory 的原始载荷（inventory/baseline_consistency/injection 都在里面）
+const memoryPayload = ref<any>(null);
+const memoryInventoryRows = computed(() => summarizeMemoryInventory(memoryPayload.value, t));
+const memoryAlertRows = computed(() => memoryAlerts(memoryPayload.value, evolutionReport.value));
 /** 结构化记忆是否启用（后端 legacy_read_only=False 表示走结构化 v1 护栏；缺失不猜） */
 const memoryStructured = ref<boolean | null>(null);
 const newMemoryText = ref('');
@@ -140,6 +146,7 @@ async function loadData() {
     selectedProfileId.value = libRes?.active_profile_id || 'stable';
     structuredLessons.value = memRes?.structured_lessons || [];
     memoryVersion.value = memRes?.version || null;
+    memoryPayload.value = memRes || null;
     memoryStructured.value = memRes && 'legacy_read_only' in memRes ? !memRes.legacy_read_only : null;
     evolutionReport.value = reportRes || null;
     loadEvolutionConfig();
@@ -180,6 +187,7 @@ async function refreshMemory() {
   const res = await api('/api/v1/admin/memory');
   structuredLessons.value = res.structured_lessons || [];
   memoryVersion.value = res.version || null;
+  memoryPayload.value = res || null;
   memoryStructured.value = 'legacy_read_only' in res ? !res.legacy_read_only : null;
 }
 
@@ -418,6 +426,37 @@ onMounted(loadData);
 
       <!-- ═══════ TAB 1 ═══════ -->
       <div v-if="activeTab === 'settings'" class="evo-tab">
+        <!-- 记忆实况与告警（§9.1/§9.3）：注入实况、baseline 一致性、等级分布、版本 -->
+        <section class="card" aria-live="polite">
+          <header class="card-head">
+            <h2 class="card-title"><ShieldCheck :size="14" />{{ t('admin.evolution.inventoryTitle') }}</h2>
+          </header>
+          <div class="evo-rep-stats">
+            <div v-for="row in memoryInventoryRows" :key="row.key" class="evo-rep-stat">
+              <span class="label-caps">{{ row.label }}</span>
+              <span class="evo-stat-v num"
+                :class="row.tone === 'bad' ? 'is-warn' : (row.tone === 'ok' ? 'is-up' : '')">{{ row.value }}</span>
+            </div>
+          </div>
+          <div v-if="memoryAlertRows.length" class="evo-insights">
+            <span class="label-caps">{{ t('admin.evolution.alertsTitle') }}</span>
+            <div class="log-panel is-flush">
+              <p v-for="a in memoryAlertRows" :key="a.code" class="mono">
+                [{{ a.severity }}] {{ a.code }} — {{ a.detail }}
+              </p>
+            </div>
+          </div>
+          <div v-if="memoryPayload?.injection?.not_injected?.length" class="evo-insights">
+            <span class="label-caps">
+              {{ t('admin.evolution.notInjectedTitle', undefined, { n: memoryPayload.injection.not_injected.length }) }}
+            </span>
+            <ul class="log-panel is-flush">
+              <li v-for="row in memoryPayload.injection.not_injected" :key="row.id" class="mono">
+                {{ row.id }} — {{ row.reason || 'CAPACITY_LIMIT' }} — {{ row.rule_text }}
+              </li>
+            </ul>
+          </div>
+        </section>
         <!-- 复盘报告 -->
         <section v-if="evolutionReport" class="card">
           <header class="card-head">

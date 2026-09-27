@@ -52,10 +52,14 @@ class PortfolioRunnerTests(unittest.TestCase):
         self.portfolio_calls: list = []
         self.engines: list = []
 
-    def _run(self, *, symbols=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), candles=None,
+    def _run(self, *, symbols=("BTC-USDT-SWAP", "ETH-USDT-SWAP"), candles=_candles,
              bar="1H", limit=50, capital=1000.0):
+        """默认提供**真实形状**的 K 线（§12.4：缺数据必须标记不可验证，
+        所以默认值不能再依赖合成序列）。"""
         def fake_fetch(sym, bar=None, limit=None):
             self.fetched.append({"sym": sym, "bar": bar, "limit": limit})
+            if candles is None:
+                return _candles(sym)
             return candles(sym) if callable(candles) else candles
 
         engines = self.engines   # ⚠️ 必须绑到闭包变量：在嵌套类里
@@ -88,9 +92,12 @@ class PortfolioRunnerTests(unittest.TestCase):
 
     def test_payload_has_the_documented_top_level_keys(self):
         payload = self._run()
+        # §12.4：报告新增 extended_metrics（成本/分组/R/反例）、shadow_rules
+        # （影子规则触发与被拒后结果）、modeled_costs（成本建模口径披露）。
         self.assertEqual(sorted(payload),
-                         ["active_symbols", "bar", "by_symbol", "limit", "portfolio",
-                          "updated_at"])
+                         ["active_symbols", "bar", "by_symbol", "extended_metrics", "limit",
+                          "modeled_costs", "portfolio", "shadow_rules",
+                          "unverifiable_symbols", "updated_at"])
 
     def test_every_symbol_in_the_universe_is_fetched_and_backtested(self):
         self._run(symbols=("BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"))
@@ -113,30 +120,37 @@ class PortfolioRunnerTests(unittest.TestCase):
         self._run(symbols=("BTC-USDT-SWAP",), candles=series)
         self.assertIs(self.engines[0].seen, series)
 
-    def test_empty_fetch_falls_back_to_a_synthetic_series(self):
-        # 第 317–333 行：抓不到行情时**不跳过标的**，而是造一段可复现的合成序列
-        self._run(symbols=("BTC-USDT-SWAP",), candles=[])
-        series = self.engines[0].seen
-        self.assertEqual(len(series), 100)
-        self.assertTrue(all(c["symbol"] == "BTC-USDT-SWAP" for c in series))
-        self.assertTrue(all(set(c) >= {"symbol", "timestamp", "ts_ms", "open", "high",
-                                       "low", "close", "volume"} for c in series))
+    def test_empty_fetch_marks_the_symbol_unverifiable_instead_of_synthesising(self):
+        """⚠️ 规划文档 §12.4：「回测不能使用合成行情替代缺失真实数据。缺数据必须标记不可验证」。
 
-    def test_synthetic_base_price_is_chosen_per_symbol(self):
-        # `100 if SOL / 2500 if ETH / 80000 if BTC / else 1`
-        for sym, expected in (("SOL-USDT-SWAP", 100.0), ("ETH-USDT-SWAP", 2500.0),
-                             ("BTC-USDT-SWAP", 80000.0), ("XYZ-USDT-SWAP", 1.0)):
-            with self.subTest(sym=sym):
-                self.engines.clear()
-                self._run(symbols=(sym,), candles=[])
-                first = self.engines[0].seen[0]
-                self.assertGreater(first["close"], expected * 0.5)
-                self.assertLess(first["close"], expected * 2.0)
+        旧实现抓不到行情时用 sin() 造 100 根假 K 线并照常聚合 —— 那是**用假数据
+        得出真结论**。现在：不建引擎、不聚合、如实记入 `unverifiable_symbols`。
+        """
+        payload = self._run(symbols=("BTC-USDT-SWAP",), candles=[])
+        self.assertEqual(self.engines, [], "缺行情不得再跑合成序列")
+        self.assertEqual(payload["unverifiable_symbols"],
+                         [{"symbol": "BTC-USDT-SWAP", "status": "UNVERIFIABLE",
+                           "reason": "NO_REAL_CANDLES"}])
+        self.assertEqual(payload["active_symbols"], [])
+        self.assertEqual(payload["by_symbol"]["BTC-USDT-SWAP"]["status"], "UNVERIFIABLE")
 
-    def test_synthetic_series_is_deterministic(self):
-        a = self._run(symbols=("BTC-USDT-SWAP",), candles=[]), self.engines[-1].seen
-        b = self._run(symbols=("BTC-USDT-SWAP",), candles=[]), self.engines[-1].seen
-        self.assertEqual([c["close"] for c in a[1]], [c["close"] for c in b[1]])
+    def test_a_missing_symbol_is_excluded_from_the_aggregate(self):
+        def _candles_by_symbol(sym):
+            return _candles(sym) if sym == "A-USDT-SWAP" else []
+
+        payload = self._run(symbols=("A-USDT-SWAP", "B-USDT-SWAP"),
+                            candles=_candles_by_symbol, capital=1000.0)
+        call = self.portfolio_calls[0]
+        self.assertEqual(call["symbols"], ["A-USDT-SWAP"], "不可验证标的不得进聚合")
+        self.assertEqual(sorted(call["asset_results"]), ["A-USDT-SWAP"])
+        self.assertEqual(payload["active_symbols"], ["A-USDT-SWAP"])
+        self.assertEqual(len(payload["unverifiable_symbols"]), 1)
+
+    def test_every_symbol_unverifiable_yields_a_neutral_empty_portfolio(self):
+        payload = self._run(symbols=("BTC-USDT-SWAP",), candles=[], capital=1000.0)
+        call = self.portfolio_calls[0]
+        self.assertEqual(call["total_initial"], call["total_final"])
+        self.assertEqual(call["combined_trades"], [])
 
     def test_portfolio_totals_are_accumulated_across_symbols(self):
         self._run(symbols=("A-USDT-SWAP", "B-USDT-SWAP"), capital=1000.0)
@@ -171,9 +185,12 @@ class PortfolioRunnerTests(unittest.TestCase):
         self.assertRegex(payload["updated_at"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(北京时间\)$")
 
     def test_empty_universe_yields_an_empty_portfolio(self):
-        self._run(symbols=())
-        self.assertEqual(self.portfolio_calls[0]["total_initial"], 0.0)
-        self.assertEqual(self.portfolio_calls[0]["total_final"], 0.0)
+        """空标的池 ⇒ 没有可评测标的。§12.4 不允许合成数据填补，
+        故聚合用**中性回退**（不虚增初始/最终权益），标的列表记为空。"""
+        payload = self._run(symbols=())
+        self.assertEqual(self.portfolio_calls[0]["symbols"], ["PORTFOLIO"])
+        self.assertEqual(payload["active_symbols"], [])
+        self.assertEqual(self.engines, [])
 
 
 class MainCliTests(unittest.TestCase):

@@ -220,6 +220,17 @@ class PromptLibraryUpdate(BaseModel):
     evolution_user: str = Field(default="", max_length=12000)
 
 
+class ExecutionPolicyPayload(BaseModel):
+    """执行策略（规划文档 §7.1）：profile 与代码硬规则之间的显式绑定。
+
+    ⚠️ 未知 mode 或 rule_set 一律拒绝激活（`r20_backend.policy.fingerprints`
+    会把非法策略标成 `valid=False`，`scripts.strategy_rules` 直接抛错 fail-closed）。
+    """
+    mode: str = Field(default="legacy", max_length=60)
+    revision: int = Field(default=1, ge=1, le=1000)
+    rule_set: str = Field(default="", max_length=80)
+
+
 class PromptProfileCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     description: str = Field(default="", max_length=240)
@@ -245,6 +256,7 @@ class PromptProfileUpdateRequest(BaseModel):
     trading_user: str | None = Field(default=None, max_length=12000)
     evolution_system: str | None = Field(default=None, max_length=12000)
     evolution_user: str | None = Field(default=None, max_length=12000)
+    execution_policy: ExecutionPolicyPayload | None = None
     note: str = Field(default="后台更新", max_length=240)
 
     @field_validator("name")

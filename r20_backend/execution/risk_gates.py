@@ -47,6 +47,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 __all__ = [
     "clamp_leverage",
     "clamp_margin",
+    "check_group_risk",
     "check_total_exposure",
 ]
 
@@ -117,6 +118,100 @@ def clamp_margin(
               f"{float(max_single_asset_margin or 0):.0f}U / 该所预算 "
               f"{float((pool or {}).get('margin_per_trade_usdt') or 0):.0f}U），已夹至上限")
     return margin, decision, margin_clamped_from
+
+
+def check_group_risk(
+    *,
+    venue: str,
+    asset: str,
+    action: str,
+    margin: float,
+    leverage: float,
+    all_positions: Optional[List[Dict[str, Any]]],
+    positions_reader: Callable[[], List[Dict[str, Any]]],
+    fail_factory: Callable[..., Any],
+    correlation_group_of: Optional[Callable[[str], str]] = None,
+    effective_group_cap: Optional[Callable[[Optional[float]], float]] = None,
+    usdt_available: Optional[float] = None,
+    entry_px: Optional[float] = None,
+    stop_px: Optional[float] = None,
+    size: Optional[float] = None,
+    ct_val: Optional[float] = None,
+) -> Optional[Any]:
+    """相关组同向风险额上限（规划文档 §5.7 第二步）。
+
+    `同一相关组 + 同一方向的已有风险额 + 新单风险额 <= group_risk_cap` 时才放行；
+    超限是**拒**不是**夹**（与 `check_total_exposure` 同口径）。
+
+    - 无相关组配置 / 上限为 0 ⇒ 不拦（返回 `None`）；
+    - **组内还没有同向持仓 ⇒ 不拦**（首仓幅度由单标的/单笔/权益上限管辖，
+      本闸门只管"同组多标的同向叠加"这件事）；
+    - 持仓读不到 ⇒ 返回 `fail_factory(...)`（fail-closed，不静默放行）；
+    - 风险额取持仓的 `risk_usdt`（缺失时退回 `initial_risk_usd` / `risk_amount`，
+      都没有则计 0 并在 detail 里如实标注）；新单风险优先按
+      `|entry-stop| × size × ct_val` 算，参数不全时退回**保证金**（已投入资本，
+      比名义额保守得多）—— 绝不用名义额冒充风险。
+
+    相关组与上限属 **L0/L1**：由调用方从 `risk_constants` 注入，LLM 不可改。
+    """
+    import math as _math
+    if correlation_group_of is None or effective_group_cap is None:
+        try:
+            from scripts.risk_constants import (correlation_group_of as _cgo,
+                                                effective_group_risk_cap as _egc)
+        except ImportError:  # pragma: no cover
+            from risk_constants import (correlation_group_of as _cgo,
+                                        effective_group_risk_cap as _egc)
+        correlation_group_of = correlation_group_of or _cgo
+        effective_group_cap = effective_group_cap or _egc
+    group = correlation_group_of(asset)
+    cap = float(effective_group_cap(usdt_available) or 0.0)
+    if not group or cap <= 0:
+        return None
+    try:
+        positions = all_positions if all_positions is not None else (positions_reader() or [])
+    except Exception as exc:
+        return fail_factory("group_risk", f"无法读取持仓以核算相关组风险: {exc}", venue=venue)
+    _a = str(action or "").lower()
+    want = "buy" if _a in ("buy_long", "buy", "long") else ("sell" if _a in ("sell_short", "sell", "short") else "")
+    if not want:
+        return None
+    existing = 0.0
+    contributing: List[str] = []
+    for row in positions:
+        base = str(row.get("base") or "")
+        if correlation_group_of(base) != group:
+            continue
+        row_side = str(row.get("side") or "").lower()
+        row_action = "buy" if row_side in ("long", "buy") else ("sell" if row_side in ("short", "sell") else "")
+        if row_action != want:
+            continue
+        risk = row.get("risk_usdt", row.get("initial_risk_usd", row.get("risk_amount")))
+        try:
+            existing += max(0.0, float(risk or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if base and base not in contributing:
+            contributing.append(base)
+    new_risk = 0.0
+    try:
+        if entry_px and stop_px and size and ct_val:
+            new_risk = abs(float(entry_px) - float(stop_px)) * abs(float(size)) * float(ct_val)
+        else:
+            new_risk = max(0.0, float(margin or 0.0))
+    except (TypeError, ValueError):
+        new_risk = max(0.0, float(margin or 0.0))
+    if existing <= 0:
+        # 组内无同向已有风险 ⇒ 本单幅度归单标的/单笔/权益上限管，不在这里拦。
+        return None
+    projected = existing + new_risk
+    if projected > cap and _math.isfinite(projected):
+        return fail_factory("group_risk",
+                            f"相关组 {group} 同向风险将达 {projected:.0f}U，超上限 {cap:.0f}U"
+                            f"（已持有 {'/'.join(contributing) or '无'} {existing:.0f}U + 本单 {new_risk:.0f}U）",
+                            venue=venue, group=group, projected_risk=round(projected, 2),
+                            cap=cap, contributing_bases=list(contributing))
+    return None
 
 
 def check_total_exposure(

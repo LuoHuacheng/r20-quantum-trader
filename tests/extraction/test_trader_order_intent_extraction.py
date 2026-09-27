@@ -296,7 +296,17 @@ class IntentParityTest(unittest.TestCase):
                                              (False, "sell", "short", "SELL_SHORT")):
             got = order_intent.build_order_intent(**self._mk(is_long=is_long))
             exp = _legacy_intent(**self._mk(is_long=is_long))
-            self.assertEqual(got, exp, f"is_long={is_long} 分叉")
+            # 2026-09-27（规划文档 §5.3-7 / §10.3）：venue_ctx **纯附加**了策略证据键
+            # （execution_policy / rule_set_hash / memory_revision / baseline_hash /
+            # injected_lesson_ids）。因此逐键比对 legacy 字段，而不是整字典相等 ——
+            # 回归强度不变（每个历史字段仍必须逐个一致），新增键另行断言。
+            self.assertEqual(got[0], exp[0])
+            self.assertEqual(got[1], exp[1])
+            for key, value in exp[2].items():
+                self.assertEqual(got[2][key], value, f"is_long={is_long} 的 {key} 与 legacy 分叉")
+            for key in ("execution_policy", "rule_set_hash", "memory_revision",
+                        "baseline_hash", "injected_lesson_ids", "strategy_mode"):
+                self.assertIn(key, got[2], f"策略证据键缺失: {key}")
             self.assertEqual(got[0], side)
             self.assertEqual(got[1], pos_side)
             self.assertIn(tag, got[2]["intent_id"])

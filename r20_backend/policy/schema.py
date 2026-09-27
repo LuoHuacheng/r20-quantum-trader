@@ -13,6 +13,9 @@ from r20_backend.version import __version__
 
 DEFAULT_BASE_VERSION = f"v{__version__}"
 
+#: 证据策略版本（规划文档 §8.1）：快照 schema 变更时递增。
+EVIDENCE_POLICY_VERSION = "2"
+
 
 _PACKAGE_UNITS = ("prompt_config", "evolution_memory", "interceptor_config",
                   "council_config", "risk_config", "venue_routing")

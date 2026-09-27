@@ -122,3 +122,55 @@ export function appendVariableSlot(content: unknown, key: string): { content: st
 export function deriveImportName(fileName: unknown): string {
   return String(fileName || '').replace(/\.json$/i, '').replace(/^r20-strategy-/, '')
 }
+
+/* ============================================================================
+ * 执行策略（规划文档 §7.1）：profile 与**代码硬规则**之间的显式绑定
+ * ---------------------------------------------------------------------------
+ * 本表必须与 Python 侧 `scripts/strategy_rules.MODE_SETUP_FAMILY` /
+ * `RULE_SET_BY_MODE` 一致 —— 跨语言无法直接 import，故由
+ * `tests/llm/test_evolution_memory_logic_frontend.py` 读 Python 模块**逐项对拍**
+ * （漂移会当场翻红，而不是等运行时被后端 422 拒绝）。
+ * ========================================================================== */
+
+export interface ExecutionPolicy {
+  mode: string
+  revision: number
+  rule_set: string
+}
+
+/** 可选执行模式 → 对应规则集（与后端一致）。`legacy` 是旧档案的默认解释。 */
+export const EXECUTION_MODE_RULE_SETS: Record<string, string> = {
+  legacy: 'legacy@1',
+  trend_confirm_5m: 'trend_following@1',
+  // 别名（与后端 `MODE_SETUP_FAMILY` 同表）：导入的档案若用这个模式，
+  // 界面必须能**原样表示**它 —— 否则保存时会把它静默改写成 legacy。
+  trend_following: 'trend_following@1',
+  mean_reversion: 'trend_following@1',
+}
+
+export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
+  mode: 'legacy',
+  revision: 1,
+  rule_set: 'legacy@1',
+}
+
+/**
+ * 读取 profile 的执行策略：缺字段的旧档案解释为 `legacy`（不是空、不是报错）。
+ * 未知 mode 也退回 `legacy` —— 前端**绝不**发明后端不认识的值。
+ */
+export function normalizeExecutionPolicy(raw: unknown): ExecutionPolicy {
+  const policy = (raw || {}) as Record<string, unknown>
+  const mode = String(policy.mode || 'legacy')
+  if (!(mode in EXECUTION_MODE_RULE_SETS)) return { ...DEFAULT_EXECUTION_POLICY }
+  const revision = Number(policy.revision)
+  return {
+    mode,
+    revision: Number.isFinite(revision) && revision >= 1 ? Math.trunc(revision) : 1,
+    rule_set: EXECUTION_MODE_RULE_SETS[mode],
+  }
+}
+
+/** 仅按模式生成保存补丁（规则集由模式派生，界面不允许手填）。 */
+export function executionPolicyPatch(mode: unknown): ExecutionPolicy {
+  return normalizeExecutionPolicy({ mode })
+}

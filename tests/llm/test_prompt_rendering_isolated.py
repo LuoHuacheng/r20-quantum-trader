@@ -84,7 +84,9 @@ class Sandbox(unittest.TestCase):
             self.stack.enter_context(patch.object(obj, name, side_effect=AssertionError("Network/process blocked")))
         shield = types.ModuleType("scripts.evolution_shield")
         self.memory = Mock(return_value="隔离心法")
+        # 规划文档 §6.3：主脑改调**分层渲染**入口（内部回落 legacy markdown）。
         shield.render_trading_memory = self.memory
+        shield.render_trading_memory_layered = self.memory
         self.stack.enter_context(patch.dict(sys.modules, {"scripts.evolution_shield": shield}))
         self.profile = {"name": "隔离策略", "pipelines": {"trading_user": [{"id": "u", "title": "自定义", "source": "custom", "enabled": True, "content": "余额={{account_balance}} 持仓={{account_positions}} 挂单={{pending_orders}}"}]}}
         node = _CONSTRUCT_NODE

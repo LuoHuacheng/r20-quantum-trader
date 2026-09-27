@@ -111,4 +111,28 @@ export const zhAdminEvolution = {
   // ── 批 67：心法输入框与模块内容文本域缺少程序化名称 ──
   memoryInputAria: '新增实战心法',
   moduleContentAria: '模块提示词内容',
+  // ── 规划文档 §9.1/§9.3：记忆实况计数与管理员告警 ──
+  inventoryTitle: '记忆实况与基准一致性',
+  alertsTitle: '管理员告警',
+  notInjectedTitle: '{n} 条生效心法超出注入上限，未进入主脑提示词',
+  layers: {
+    title: '三层复盘（事实 / 假设 / 提案）',
+    facts: '事实（可观测）',
+    hypotheses: '待验证假设',
+    proposals: '规则提案',
+  },
+  inventory: {
+    total: '总记忆条数',
+    enabled: '启用条数',
+    active: '生效（未过期）条数',
+    injected: '实际注入条数',
+    notInjected: '未注入条数',
+    baseline: '基准心法条数',
+    baselineConsistency: '基准一致性',
+    heuristics: '已审核启发式',
+    observations: '待验证观察',
+    expired: '过期条数',
+    ledgerRevision: '最近 ledger revision',
+    memoryRevision: '最近 memory revision',
+  },
 };

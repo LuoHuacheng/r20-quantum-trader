@@ -163,3 +163,13 @@ def close_trade_payload(*, is_long, timestamp_full, name, action_type, side_suff
         "pnl": pnl,
         "remark": remark,
     }
+
+
+def exit_evidence_fields(trade_data, *, data_dir):
+    """平仓侧证据字段（规划文档 §8.2）—— 唯一实现在 `scripts/trader/evidence_stamp.py`。
+
+    本模块负责**平仓载荷**（`close_trade_payload` 的 14 字段被对拍门钉住、逐字节不可改），
+    证据章因此落在 `record_trade` 门面壳里；这里提供语义入口，供壳与测试按域解析。
+    """
+    from scripts.trader.evidence_stamp import exit_evidence_fields as _impl
+    return _impl(trade_data, data_dir=data_dir)

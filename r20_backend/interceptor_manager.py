@@ -375,6 +375,29 @@ def run_interceptor_pipeline(package: dict[str, Any], decision: dict[str, Any], 
         if not is_same:
             return "WAIT", "已有反向或不兼容持仓，禁止借决策通道反向开仓，安全降级为 WAIT。", 0.0
 
+    # 3. 结构化策略硬规则（L1，代码执行；规划文档 §5.2/§5.3 第 3 步）
+    #
+    # 这是「模型不得放宽硬规则」的落地点：RSI 极值追价 / 反向动能冲击门禁
+    # 由版本化规则集计算，按 setup_kind 区分策略，未知一律 fail-closed。
+    # 旧 legacy 模式的规则集 `gates_enabled=False`，行为与历史完全一致。
+    try:
+        from scripts.strategy_rules import (StrategyRuleError, evaluate_strategy_hard_rules,
+                                            extract_gate_inputs)
+        gate_inputs = extract_gate_inputs(package, decision, context)
+        allowed, gate_reason, _setup_kind = evaluate_strategy_hard_rules(
+            action=raw_action, strategy_mode=gate_inputs["strategy_mode"],
+            rsi=gate_inputs["rsi_15m"], jerk=gate_inputs["jerk"],
+            setup_kind=gate_inputs.get("setup_kind"))
+        if not allowed:
+            logger.warning("HARD_RULE_BLOCKED strategy hard rule blocked %s %s: %s",
+                           raw_action, inst_id, gate_reason)
+            return "WAIT", f"核心风控拦截·策略硬规则: {gate_reason}", 0.0
+    except StrategyRuleError as exc:
+        return "WAIT", f"核心风控拦截·策略规则读取失败，安全降级为 WAIT: {exc}", 0.0
+    except Exception as exc:  # 规则层任何意外都 fail-closed
+        logger.error("strategy hard rule evaluation failed: %s", exc)
+        return "WAIT", f"核心风控拦截·策略硬规则不可用，安全降级为 WAIT: {exc}", 0.0
+
     # 2. Non-Bypassable Core Safety Floor: Finite values, Geometry & Global Minimum RR >= 2.0
     quote_valid, quote_reason, rr = validate_quote_geometry_and_rr(raw_action, entry, tp, sl)
     if not quote_valid:
@@ -390,7 +413,33 @@ def run_interceptor_pipeline(package: dict[str, Any], decision: dict[str, Any], 
     if conf < conf_floor:
         return "WAIT", f"核心风控拦截：置信度低于安全底线 ({conf:.1f}% < {conf_floor:.1f}%)", rr
 
-    # 4. Pipeline Execution across all enabled plugins (with input isolation & fail-closed)
+    # 4. 相关组同向敞口（规划文档 §5.7 第一步）：同一相关标的组内同向持仓笔数超限即拒。
+    #
+    # 相关组与上限属 **L0/L1**（risk_constants），LLM/记忆文本无权修改；
+    # 数量闸门放在核心管线是因为它**所有下单路径都经过**，而且只需
+    # `context["active_position_sides"]` 就能算（不依赖具体交易所/保证金口径）。
+    try:
+        from scripts.risk_constants import (MAX_GROUP_SAME_DIRECTION_POSITIONS,
+                                            correlation_group_of)
+        if MAX_GROUP_SAME_DIRECTION_POSITIONS > 0 and raw_action in {"BUY_LONG", "SELL_SHORT"}:
+            target_group = correlation_group_of(inst_id)
+            if target_group:
+                wanted = "long" if raw_action == "BUY_LONG" else "short"
+                same_dir_same_group = 0
+                for other_id, other_side in (active_position_sides or {}).items():
+                    if str(other_side).lower() != wanted:
+                        continue
+                    if correlation_group_of(str(other_id)) == target_group:
+                        same_dir_same_group += 1
+                if same_dir_same_group >= MAX_GROUP_SAME_DIRECTION_POSITIONS:
+                    return "WAIT", (f"核心风控拦截·相关组同向敞口: {target_group} 已有 "
+                                    f"{same_dir_same_group} 笔同向持仓（上限 "
+                                    f"{MAX_GROUP_SAME_DIRECTION_POSITIONS}）"), 0.0
+    except Exception as exc:
+        logger.error("correlation group gate failed: %s", exc)
+        return "WAIT", f"核心风控拦截·相关组敞口判定不可用，安全降级为 WAIT: {exc}", 0.0
+
+    # 5. Pipeline Execution across all enabled plugins (with input isolation & fail-closed)
     # 插件看到的包经过文档契约规范化（见 _with_flat_dynamics）
     plugin_package = _with_flat_dynamics(package)
     plugins = list_plugins(create_if_missing=False)

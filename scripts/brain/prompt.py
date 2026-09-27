@@ -195,9 +195,19 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
         pending_orders_detail, tz_bj=tz_bj, datetime=datetime)
 
 
-    from scripts.evolution_shield import render_trading_memory
+    # 长期记忆分层（规划文档 §6.3/§6.4）：
+    # 【已审核启发式】/【待验证观察】两块；未审核提案、退役条目、基线不进交易提示词。
+    # 实现收在 evolution_shield 里（单一函数 = 单一 import + 单一赋值，
+    # 既有"记忆消费节点"对拍门不需要改）。
+    from scripts.evolution_shield import render_trading_memory_layered
     # Damaged authority raises; empty authority never falls back to legacy text.
-    memory_lessons = render_trading_memory(ai_memory_md_file, ai_memory_file)
+    memory_lessons = render_trading_memory_layered(ai_memory_md_file, ai_memory_file)
+
+    # 宿主硬规则区块（规划文档 §6.3）：版本一律取代码事实，不靠提示词自称。
+    # 装配收在 strategy_rules 里 —— 这样 prompt.py 对 evolution_shield 只保留
+    # 一个 import + 一个 memory_lessons 赋值（既有“记忆消费节点”对拍门不需要改）。
+    from scripts.strategy_rules import render_host_hard_rules_block
+    host_hard_rules = render_host_hard_rules_block()
 
     # Harvest Latest Live News & Multi-Coin Sentiment
     news_briefs = []
@@ -237,6 +247,7 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
 【当前在途挂单列表】:
 {pending_orders_text}
 
+{host_hard_rules}
 {memory_lessons}
 
 ======================= 【全标的池原生行情、技术指标与筹码矩阵】 =======================
@@ -317,7 +328,12 @@ def construct_full_market_prompt(packages: List[Dict[str, Any]], pos_summary: st
         "account_positions": f"【账户持仓概况】: {pos_summary}\n【当前活动在途持仓明细】:\n{active_pos_text}",
         "pending_orders": f"【当前在途挂单列表】:\n{pending_orders_text}",
         "news_intelligence": f"【宏观环境基调】: {macro_env}\n【最新核心资讯要闻】:\n{news_text}",
-        "trading_memory": memory_lessons.strip(),
+        # 宿主硬规则必须先于记忆出现（§6.3）：模块化布局只替换 {{trading_memory}}
+        #（档案里的 base-ts-memory 模块），故硬规则前缀在**这个变量**上，
+        # 而不是仅写在模板里 —— 否则模块化布局会把模板整段丢弃。
+        "trading_memory": (f"{host_hard_rules}\n{memory_lessons}".strip()
+                           if host_hard_rules else memory_lessons.strip()),
+        "host_hard_rules": host_hard_rules,
         "market_regime": regime_text,
         "market_matrix": f"{regime_text}\n\n{all_market_str}" if regime_text else all_market_str,
     }

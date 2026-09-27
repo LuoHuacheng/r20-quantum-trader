@@ -695,7 +695,13 @@ def build_risk_budget_text(usdt_available: float = None) -> str:
             if rc.SCALE_OUT_ENABLED else
             "- 分批止盈机制: 【已禁用】(全仓奔跑至目标止盈位或触发动态追踪止损)\n"
         )
-        + f"- 止损后同标的冷静期: {rc.STOP_COOLDOWN_MINUTES} 分钟"
+        + f"- 止损后同标的冷静期: {rc.STOP_COOLDOWN_MINUTES} 分钟\n"
+        # 规划文档 §5.7：相关标的组同向敞口（L0/L1），与执行层同源披露。
+        f"- 相关组同向持仓上限: {rc.MAX_GROUP_SAME_DIRECTION_POSITIONS} 笔/组 "
+        f"(相关组: {', '.join(f'{k}={v}' for k, v in (rc.CORRELATION_GROUPS or {}).items())}; "
+        "0=不额外收紧，执行层硬拦截)\n"
+        f"- 相关组同向风险额上限: {rc.effective_group_risk_cap(_eq):g} USDT/组 "
+        f"(min(绝对封顶 {rc.MAX_GROUP_RISK_USDT:g}, 可用余额 {rc.GROUP_RISK_CAP_EQUITY_RATIO:.0%})；已有同向风险+本单超限则拒开)"
     )
     if _eq < 200.0:
         text += (

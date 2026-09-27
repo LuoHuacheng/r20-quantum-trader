@@ -1,5 +1,19 @@
 """信号评分（B3 抽取第一块）。
 
+## ⚠️ 本模块**不是**最终安全判断（规划文档 §5.4）
+
+`evaluate_asset_signal` 只产出评分与解释性候选（`score, action, reasons, tag, desc`）。
+真正决定「这单能不能发」的是三道**代码门禁**（顺序不可颠倒）：
+
+1. 核心拦截器管线（`r20_backend/interceptor_manager.py`）：数据有效性 → 持仓冲突 →
+   结构化策略硬规则（RSI/Jerk，按 setup_kind）→ 价格几何与 R:R → 相关组敞口 → 用户插件；
+2. 开仓扫描前的统一策略硬门禁（`scripts/trader/entry_execution.py::apply_strategy_hard_gates`）；
+3. 下单前复验（`ai_factor_trader.submit_protected_limit_order` 壳：规则 hash 复验 +
+   最终止损距离的风险张数收紧）。
+
+本模块的 `action` 不参与上述任何一步的放行判定 —— 模型与评分都可以提建议，
+但不得据此绕过硬规则。
+
 从 `scripts/ai_factor_trader.py`（原 3565 行）搬出的 `evaluate_asset_signal`
 与它专用的 `clamp`。
 

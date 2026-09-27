@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from .execution import own_records as own_position_records
 
 from .execution.risk_gates import (
+    check_group_risk as _check_group_risk,
     check_total_exposure as _check_total_exposure,
     clamp_leverage as _clamp_leverage,
     clamp_margin as _clamp_margin,
@@ -369,6 +370,21 @@ def open_protected_position(decision: Dict[str, Any], *,
         raise
     except Exception as exc:
         return _fail("precheck", f"{asset} 既有持仓探针失败，无法排除外部仓，拒开: {exc}", venue=venue)
+    # 复用这一次探针结果给后面的相关组闸门（§5.7）：每单持仓只读一次。
+    try:
+        _pos_cache["rows"] = _all_positions
+    except Exception:
+        pass
+
+    # 相关组同向风险额（规划文档 §5.7 第二步）：同一相关组、同一方向的已有风险
+    # + 新单风险 ≤ group_risk_cap。相关组与上限属 **L0/L1**（risk_constants）。
+    _group_fail = _check_group_risk(
+        venue=venue, asset=asset, action=action, margin=_margin_unclamped,
+        leverage=leverage, all_positions=_all_positions,
+        positions_reader=_positions_for_exposure, fail_factory=_fail,
+        entry_px=entry, stop_px=sl, size=None, ct_val=None)
+    if _group_fail is not None:
+        return _group_fail
     existing = [p for p in _all_positions
                 if str(p.get("base") or "").upper() == asset
                 and abs(float(p.get("size_signed") or 0)) > 1e-9]

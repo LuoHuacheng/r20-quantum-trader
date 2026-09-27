@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import sys
 from pathlib import Path
@@ -75,6 +76,12 @@ class MemoryItemRequest(BaseModel):
 class MemoryUpdateAllRequest(BaseModel):
     items: list[str] = Field(min_length=0, max_length=50)
     expected_version: str | None = Field(default=None, max_length=64)
+
+
+class ProposalDecisionRequest(BaseModel):
+    """人工审批入口（规划文档 §4.5-6）：只裁定队列项，不自动发布硬规则。"""
+    proposal_id: str = Field(min_length=1, max_length=200)
+    decision: str = Field(min_length=1, max_length=16)
 
 
 
@@ -197,10 +204,27 @@ def _memory_service_call(name: str, *args, **kwargs):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except service.MemoryCorruptError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except service.MemoryBaselineError as exc:
+        # 基准保护类拒绝：客户端错误（不是服务端故障），前端据此提示 superadmin。
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except IndexError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _pending_proposals_path():
+    from pathlib import Path as _Path
+    return _Path(DATA_DIR) / "rule_proposals_pending.json"
+
+
+def _read_pending_proposals() -> dict:
+    try:
+        with open(_pending_proposals_path(), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {"proposals": []}
+    except Exception:
+        return {"proposals": []}
 
 
 @app.get("/api/v1/admin/memory")
@@ -213,17 +237,135 @@ def get_admin_memory(x_r20_admin_token: str | None = Header(default=None), x_r20
     try:
         from scripts import evolution_shield as _shield
         payload["injection"] = _shield.injection_report(payload.get("structured_lessons") or [])
+        payload["baseline_manifest"] = _shield.baseline_manifest()
     except Exception as exc:
         payload["injection"] = {"error": str(exc)[:160]}
     return payload
 
 
+@app.get("/api/v1/admin/memory/baseline-consistency")
+def get_baseline_consistency(x_r20_admin_token: str | None = Header(default=None), x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
+    """基准一致性完整报告（带 `checked_at`；与 `GET /admin/memory` 的纯读口径分开）。"""
+    refresh_settings()
+    require_admin_header(x_r20_admin_token, x_r20_session)
+    from scripts import evolution_shield as _shield
+    lessons = _memory_service_call("load_structured_memory")
+    return {"consistency": _shield.check_baseline_consistency(lessons),
+            "manifest": _shield.baseline_manifest(),
+            "baseline_hash": _shield.baseline_manifest_hash()}
+
+
+@app.get("/api/v1/admin/evolution/alerts")
+def get_evolution_alerts(x_r20_admin_token: str | None = Header(default=None), x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
+    """管理员告警（规划文档 §9.3）：只根据**已有产物**判定，读不到就不报。"""
+    refresh_settings()
+    require_admin_header(x_r20_admin_token, x_r20_session)
+    alerts: list[dict[str, Any]] = []
+    try:
+        from scripts import evolution_shield as _shield
+        lessons = _memory_service_call("load_structured_memory")
+        consistency = _shield.check_baseline_consistency(lessons)
+        if not consistency["healthy"]:
+            alerts.append({"code": "MEMORY_BASELINE_MISMATCH", "severity": "CRITICAL",
+                           "detail": f"missing={consistency['missing_ids']} mismatched={consistency['mismatched_ids']}"})
+    except Exception as exc:
+        alerts.append({"code": "MEMORY_READ_FAILED", "severity": "CRITICAL",
+                       "detail": str(exc)[:200]})
+    report: dict[str, Any] = {}
+    try:
+        with open(os.path.join(DATA_DIR, "self_improvement_report.json"), "r", encoding="utf-8") as handle:
+            report = json.load(handle)
+    except Exception:
+        report = {}
+    sources = report.get("snapshot_source_audit") or {}
+    total = int(sources.get("total") or 0)
+    untrusted = int(sources.get("untrusted") or 0)
+    if total and untrusted / total > 0.5:
+        alerts.append({"code": "SNAPSHOT_UNOBSERVABLE_RATIO", "severity": "WARNING",
+                       "detail": f"不可信来源快照占比 {untrusted}/{total}"})
+    if report.get("reused_snapshot_groups"):
+        alerts.append({"code": "SNAPSHOT_REUSED", "severity": "WARNING",
+                       "detail": f"{len(report['reused_snapshot_groups'])} 组重复信号快照"})
+    if report.get("asset_multiplier_status") in {"UNAVAILABLE", "EXPIRED", "INVALID", "PENDING_REVIEW"}:
+        alerts.append({"code": "ASSET_MULTIPLIER_INVALID", "severity": "WARNING",
+                       "detail": f"资产乘数状态 {report.get('asset_multiplier_status')}"})
+    if report.get("llm_failed"):
+        alerts.append({"code": "LLM_REVIEW_FAILED", "severity": "WARNING",
+                       "detail": str(report.get("llm_error") or "复盘模型失败")[:200]})
+    pending = _read_pending_proposals().get("proposals") or []
+    if pending:
+        alerts.append({"code": "RULE_PROPOSAL_REQUIRES_APPROVAL", "severity": "INFO",
+                       "detail": f"{len(pending)} 条提案等待人工审批"})
+    return {"alerts": alerts}
+
+
+@app.get("/api/v1/admin/evolution/proposals/pending")
+def get_pending_proposals(x_r20_admin_token: str | None = Header(default=None), x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
+    refresh_settings()
+    require_admin_header(x_r20_admin_token, x_r20_session)
+    return _read_pending_proposals()
+
+
+@app.post("/api/v1/admin/evolution/proposals/decision")
+def decide_pending_proposal(payload: "ProposalDecisionRequest", x_r20_admin_token: str | None = Header(default=None), x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
+    """人工审批入口（仅超级管理员）。
+
+    ⚠️ 审批**不等于**发布硬规则：只把队列项标为 APPROVED/REJECTED 并留痕；
+    硬规则参数仍只能由代码与显式策略版本发布改变（规划文档 §4.5-6 / §6-8）。
+    """
+    refresh_settings()
+    actor = require_superadmin(x_r20_session)
+    current = _read_pending_proposals()
+    proposals = current.get("proposals") or []
+    target = None
+    for item in proposals:
+        if str(item.get("rule_id") or item.get("text") or "") == str(payload.proposal_id):
+            target = item
+            break
+    if target is None:
+        raise HTTPException(status_code=404, detail="未找到该待审批提案")
+    decision = str(payload.decision or "").upper()
+    if decision not in {"APPROVED", "REJECTED"}:
+        raise HTTPException(status_code=422, detail="decision 必须是 APPROVED 或 REJECTED")
+    target["status"] = decision
+    target["approved_by"] = actor.get("username", "admin")
+    target["approved_at"] = _now_bj_str()
+    from r20_backend.policy.io import _atomic_write_json
+    _atomic_write_json(str(_pending_proposals_path()), current)
+    audit_record("evolution.proposal.decision", "success",
+                 {"actor": actor.get("username", "admin"), "proposal": payload.proposal_id,
+                  "decision": decision})
+    return {"ok": True, "target": target, "proposals": proposals}
+
+
+def _now_bj_str() -> str:
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @app.post("/api/v1/admin/memory/toggle/{lesson_id}")
-def toggle_admin_memory_lesson(lesson_id: str, expected_version: str | None = None, x_r20_admin_token: str | None = Header(default=None), x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
+def toggle_admin_memory_lesson(lesson_id: str, expected_version: str | None = None, confirm_token: str | None = None, x_r20_admin_token: str | None = Header(default=None), x_r20_session: str | None = Header(default=None, alias="X-R20-Session")) -> dict[str, Any]:
     refresh_settings()
     actor = require_admin_header(x_r20_admin_token, x_r20_session)
     try:
-        target = _memory_service_call("toggle_lesson", lesson_id, expected_version=expected_version)
+        try:
+            target = _memory_service_call("toggle_lesson", lesson_id,
+                                          expected_version=expected_version,
+                                          confirm_token=confirm_token)
+        except HTTPException as _exc:
+            # 规划文档 §4.1-5 / §9.1：停用基准心法 = 把代码硬规则从提示词里摘掉，
+            # 必须**超级管理员 + 显式 confirm_token**。首次调用被拒时才升级校验，
+            # 不改变普通启发式的调用序列（既有路由测试按首次调用断言）。
+            if _exc.status_code != 422 or "BASELINE_DISABLE_REQUIRES_APPROVAL" not in str(_exc.detail):
+                raise
+            require_superadmin(x_r20_session)
+            from scripts import evolution_shield as _shield
+            if str(confirm_token or "") != _shield.baseline_disable_token(lesson_id):
+                raise HTTPException(status_code=422, detail=(
+                    "停用基准心法需要超级管理员与 confirm_token（规划文档 §4.1-5）"))
+            target = _memory_service_call("toggle_lesson", lesson_id,
+                                          expected_version=expected_version,
+                                          confirm_token=confirm_token)
         if not target:
             raise HTTPException(status_code=404, detail="未找到指定心法条目")
         audit_record("memory.lesson.toggle", "success", {"actor": actor.get("username", "admin"), "id": lesson_id, "enabled": target.get("enabled")})

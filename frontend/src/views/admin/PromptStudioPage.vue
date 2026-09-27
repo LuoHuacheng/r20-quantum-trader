@@ -31,13 +31,14 @@
 import {
   renderSourceBadge, cloneModulesForEditing, compileWorkingModules,
   buildTemplatePreview, computeInsertTarget, appendVariableSlot, deriveImportName,
+  EXECUTION_MODE_RULE_SETS, executionPolicyPatch, normalizeExecutionPolicy,
 } from './promptStudioLogic';
 import { fmtDate, fmtDateTime } from '../../utils/format';
 import { useToast } from '../../composables/useToast';
 import { useConfirm } from '../../composables/useConfirm';
 const toast = useToast();
 const { ask } = useConfirm();
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watchEffect } from 'vue';
 import { useI18n } from '../../composables/useI18n';
 import { useRovingTabs } from '../../composables/useRovingTabs';
 import PageHeader from '../../components/admin/PageHeader.vue';
@@ -101,6 +102,11 @@ const pipelines = computed(() => [
 ]);
 
 const selectedProfile = computed(() => (lib.value?.profiles || []).find((p: any) => p.id === selectedProfileId.value) || null);
+// 规划文档 §7.1：执行策略随 profile 冻结（缺字段的旧档案 ⇒ legacy）
+const executionMode = computed(() => normalizeExecutionPolicy(selectedProfile.value?.execution_policy).mode);
+const executionModes = Object.keys(EXECUTION_MODE_RULE_SETS);
+const executionModeDraft = ref<string>('legacy');
+watchEffect(() => { executionModeDraft.value = executionMode.value; });
 const templateVariables = computed(() => lib.value?.template_variables || []);
 
 /** 当前编辑中的模块（activeEditingIdx 越界时为 null） */
@@ -233,6 +239,8 @@ async function saveProfile() {
         enabled: true,
         editor_mode: 'modules',
         pipelines: pipelinesMap,
+        // 规划文档 §7.1：执行策略与 profile 一起落盘（规则集由模式派生）
+        execution_policy: executionPolicyPatch(executionModeDraft.value),
       }),
     })
     const pipe = pipelines.value.find((p) => p.id === activePipeline.value)?.label
@@ -629,6 +637,16 @@ onMounted(loadLib)
         <!-- 模块编排 -->
         <section class="card ps-center">
           <header class="card-head">
+            <label class="ps-exec-policy">
+              <span class="label-caps">{{ t('admin.promptStudio.executionPolicy.label') }}</span>
+              <select v-model="executionModeDraft" class="input input-sm"
+                :title="t('admin.promptStudio.executionPolicy.hint')"
+                :aria-label="t('admin.promptStudio.executionPolicy.label')">
+                <option v-for="mode in executionModes" :key="mode" :value="mode">
+                  {{ mode }} → {{ EXECUTION_MODE_RULE_SETS[mode] }}
+                </option>
+              </select>
+            </label>
             <div class="seg" role="tablist" :aria-label="t('admin.promptStudio.pipelineTabsAria')">
               <button
                 v-for="(p, pi) in pipelines"

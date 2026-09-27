@@ -60,4 +60,16 @@ export const zhEvolution = {
   autoIterateBadge: '每 6 小时自主覆写迭代',
   snapshotAuditTitle: '确定性物理快照审计',
   actText: '【{type}】{text}',
+  // ── 规划文档 §9.2：事实/假设/提案三层与证据版本 ──
+  layers: {
+    title: '三层复盘（事实 / 假设 / 提案）',
+    facts: '事实（可观测）',
+    hypotheses: '待验证假设',
+    proposals: '规则提案',
+    empty: '本轮无条目',
+    evidence: '证据',
+    groups: '独立样本组',
+    counterexamples: '反例',
+    requiresApproval: '等待人工审批',
+  },
 };

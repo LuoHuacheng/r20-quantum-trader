@@ -153,4 +153,9 @@ export const enAdminPromptStudio = {
   imported: 'Strategy profile “{name}” imported!',
   importFailed: 'Import failed: {msg}',
   compiledCopied: 'Compiled outbound prompt copied',
+  // Plan §7.1: execution policy (explicit binding between profile and code hard rules)
+  executionPolicy: {
+    label: 'Execution policy (rule set)',
+    hint: 'The rule set is derived from the mode; unknown modes are refused by the backend. legacy = old rules (no extra gates)',
+  },
 };

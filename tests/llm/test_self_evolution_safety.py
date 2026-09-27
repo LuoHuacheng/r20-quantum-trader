@@ -141,8 +141,11 @@ class SelfEvolutionSafetyTests(unittest.TestCase):
         safe = self.llm.return_value["ai_long_term_memory"][0]
         report = self.run_cycle()
         self.assertFalse(report["memory_preserved"])
-        self.assertEqual(report["core_lessons"], [safe])
-        self.assertEqual([i["rule_text"] for i in shield.load_structured_memory()], [safe])
+        # 规划文档 §4.1-3：发布时宿主会把代码基准一并合并进权威记忆（基线置尾）。
+        self.assertEqual(report["core_lessons"][0], safe)
+        self.assertEqual([i["rule_text"] for i in shield.load_structured_memory()][0], safe)
+        self.assertEqual(len(report["core_lessons"]), 1 + len(shield.BASELINE_LESSONS))
+        self.assertTrue(shield.check_baseline_consistency(shield.load_structured_memory())["healthy"])
         self.assertEqual(self.snapshot(), self.old)  # Legacy files never published again.
         markdown = shield.render_trading_memory(self.md_path, self.json_path)
         self.assertIn(safe, markdown)
@@ -175,12 +178,14 @@ class SelfEvolutionSafetyTests(unittest.TestCase):
         safe = self.llm.return_value["ai_long_term_memory"][0]
         _, _, item = shield.add_safe_lesson(safe)
         shield.toggle_lesson(item["id"], expected_version=shield.read_memory_snapshot()["version"])
-        before = shield.STRUCTURED_MEMORY_FILE.read_bytes()
         report = self.run_cycle()
-        self.assertTrue(report["memory_preserved"])
-        self.assertEqual(report["core_lessons"], [])
-        self.assertEqual(shield.STRUCTURED_MEMORY_FILE.read_bytes(), before)
-        self.assertEqual(shield.render_trading_memory(self.md_path), "")
+        # 提案被停用与否决项不复活；但发布路径会把缺失的代码基准补回（§4.1-3）。
+        self.assertFalse(report["memory_preserved"])
+        self.assertEqual(report["core_lessons"], [i["rule_text"] for i in shield.BASELINE_LESSONS])
+        rows = shield.load_structured_memory()
+        self.assertFalse(next(i for i in rows if i["rule_text"] == safe)["enabled"])
+        self.assertEqual(shield.render_trading_memory(self.md_path).count("- "),
+                         len(shield.BASELINE_LESSONS))
 
     def test_concurrent_toggle_during_review_conflicts(self):
         _, _, item = shield.add_safe_lesson("【已有经验】4H多头回踩均线支撑时开多")
@@ -341,7 +346,8 @@ class UnifiedMemoryTests(unittest.TestCase):
         self.assertEqual(sorted([queue.get(timeout=2), queue.get(timeout=2)]), ["conflict", "saved"])
         queue.close()
         queue.join_thread()
-        self.assertEqual(len(shield.load_structured_memory()), 1)
+        # 发布成功者会同时带上代码基准（§4.1-3）
+        self.assertEqual(len(shield.load_structured_memory()), 1 + len(shield.BASELINE_LESSONS))
 
     def test_rollback_revision_rejects_old_snapshot_even_same_content(self):
         shield.rollback_to_baseline(expected_version=shield.read_memory_snapshot()["version"])

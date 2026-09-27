@@ -723,3 +723,100 @@ class AppWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EvolutionEvidenceRoutesTests(_Base):
+    """自进化证据类路由（规划文档 §9.1/§9.3）：基准一致性、告警、待审批提案、baseline 停用双闸。"""
+
+    def setUp(self):
+        super().setUp()
+        self._start(mock.patch.object(A, "refresh_settings"))
+        self.admin = self._start(mock.patch.object(
+            A, "require_admin_header",
+            return_value={"id": 1, "username": "alice", "role": "admin"}))
+        self.superadmin = self._start(mock.patch.object(
+            A, "require_superadmin", return_value={"id": 1, "username": "root", "role": "superadmin"}))
+        self.audit = self._start(mock.patch.object(A, "audit_record"))
+        self.service = self._start(mock.patch.object(A, "_memory_service_call"))
+
+    def test_memory_view_exposes_the_baseline_manifest(self):
+        self.service.return_value = {"structured_lessons": []}
+        with mock.patch.object(ES, "injection_report", return_value={}), \
+             mock.patch.object(ES, "baseline_manifest", return_value={"lesson_x": {}}):
+            out = A.get_admin_memory()
+        self.assertEqual(out["baseline_manifest"], {"lesson_x": {}})
+
+    def test_baseline_consistency_route_returns_the_full_report(self):
+        self.service.return_value = [{"id": "lesson_x"}]
+        with mock.patch.object(ES, "check_baseline_consistency",
+                               return_value={"healthy": True, "checked_at": "T"}), \
+             mock.patch.object(ES, "baseline_manifest", return_value={}), \
+             mock.patch.object(ES, "baseline_manifest_hash", return_value="hash"):
+            out = A.get_baseline_consistency()
+        self.assertTrue(out["consistency"]["healthy"])
+        self.assertEqual(out["baseline_hash"], "hash")
+        self.admin.assert_called_once()
+
+    def test_alerts_route_reports_a_baseline_mismatch(self):
+        self.service.return_value = []
+        with mock.patch.object(ES, "check_baseline_consistency",
+                               return_value={"healthy": False, "missing_ids": ["lesson_a"],
+                                             "mismatched_ids": []}):
+            out = A.get_evolution_alerts()
+        codes = {a["code"] for a in out["alerts"]}
+        self.assertIn("MEMORY_BASELINE_MISMATCH", codes)
+        self.assertEqual(next(a for a in out["alerts"]
+                              if a["code"] == "MEMORY_BASELINE_MISMATCH")["severity"], "CRITICAL")
+
+    def test_alerts_route_ignores_missing_artifacts(self):
+        self.service.return_value = []
+        with mock.patch.object(ES, "check_baseline_consistency",
+                               return_value={"healthy": True, "missing_ids": [],
+                                             "mismatched_ids": []}):
+            out = A.get_evolution_alerts()
+        self.assertEqual(out["alerts"], [])
+
+    def test_toggle_of_a_baseline_requires_superadmin_and_a_token(self):
+        self.service.side_effect = lambda name, *a, **k: (
+            [{"id": "lesson_trend_pullback", "is_baseline": True, "enabled": True}]
+            if name == "load_structured_memory" else True)
+        # 普通管理员 + 无 token ⇒ 服务层语义拒绝（BASELINE_DISABLE_REQUIRES_APPROVAL）
+        def _raise(*a, **k):
+            raise HTTPException(status_code=422,
+                                detail="BASELINE_DISABLE_REQUIRES_APPROVAL: 停用基准心法需要人工确认 token")
+        self.service.side_effect = _raise
+        with self.assertRaises(HTTPException) as ctx:
+            A.toggle_admin_memory_lesson("lesson_trend_pullback")
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.superadmin.assert_called_once()
+
+    def test_pending_proposals_route_reads_the_queue(self):
+        out = A.get_pending_proposals()
+        self.assertIn("proposals", out)
+        self.admin.assert_called_once()
+
+    def test_proposal_decision_requires_superadmin(self):
+        with mock.patch.object(A, "_read_pending_proposals",
+                               return_value={"proposals": [{"rule_id": "r1"}]}), \
+             mock.patch("r20_backend.policy.io._atomic_write_json"), \
+             mock.patch.object(A, "_pending_proposals_path", return_value="/tmp/x.json"):
+            out = A.decide_pending_proposal(A.ProposalDecisionRequest(proposal_id="r1",
+                                                                     decision="APPROVED"))
+        self.superadmin.assert_called_once()
+        self.assertEqual(out["target"]["status"], "APPROVED")
+        self.assertEqual(out["target"]["approved_by"], "root")
+
+    def test_proposal_decision_rejects_an_unknown_id(self):
+        with mock.patch.object(A, "_read_pending_proposals", return_value={"proposals": []}):
+            with self.assertRaises(HTTPException) as ctx:
+                A.decide_pending_proposal(A.ProposalDecisionRequest(proposal_id="nope",
+                                                                    decision="APPROVED"))
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_proposal_decision_validates_the_decision_value(self):
+        with mock.patch.object(A, "_read_pending_proposals",
+                               return_value={"proposals": [{"rule_id": "r1"}]}):
+            with self.assertRaises(HTTPException) as ctx:
+                A.decide_pending_proposal(A.ProposalDecisionRequest(proposal_id="r1",
+                                                                    decision="MAYBE"))
+        self.assertEqual(ctx.exception.status_code, 422)

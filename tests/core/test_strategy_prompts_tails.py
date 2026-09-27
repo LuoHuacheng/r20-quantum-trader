@@ -281,3 +281,37 @@ class StrategyPromptsTailsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExecutionPolicySaveTests(StrategyPromptsTailsTests):
+    """规划文档 §7.1：profile 保存路径必须接受并校验 `execution_policy`。"""
+
+    def test_a_valid_execution_policy_is_forwarded(self):
+        payload = sp.PromptProfileUpdateRequest(
+            execution_policy={"mode": "trend_confirm_5m", "revision": 1,
+                              "rule_set": "trend_following@1"})
+        with patch.object(sp, "update_profile",
+                          return_value={"id": "valid_id", "name": "x"}) as upd, \
+             patch.object(sp, "validate_profile", return_value={"valid": True, "errors": []}):
+            sp.update_prompt_profile_api("valid_id", payload)
+        sent = upd.call_args[0][1]
+        self.assertEqual(sent["execution_policy"],
+                         {"mode": "trend_confirm_5m", "revision": 1,
+                          "rule_set": "trend_following@1"})
+
+    def test_an_unknown_mode_is_refused_by_the_library(self):
+        """未知模式在 `update_profile` 里被拒（ValueError）⇒ 路由转 400。"""
+        payload = sp.PromptProfileUpdateRequest(
+            execution_policy={"mode": "yolo", "revision": 1, "rule_set": "legacy@1"})
+        with patch.object(sp, "update_profile",
+                          side_effect=ValueError("执行策略非法: 未知执行模式: yolo")):
+            with self.assertRaises(HTTPException) as ctx:
+                sp.update_prompt_profile_api("valid_id", payload)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("执行策略非法", ctx.exception.detail)
+
+    def test_an_invalid_revision_is_refused_by_the_schema(self):
+        from pydantic import ValidationError as _VE
+        with self.assertRaises(_VE):
+            sp.PromptProfileUpdateRequest(
+                execution_policy={"mode": "legacy", "revision": 0, "rule_set": "legacy@1"})

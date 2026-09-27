@@ -228,13 +228,20 @@ class AssetMultiplierTests(_CacheBase, unittest.TestCase):
         out = self._assemble(decisions={"BTC-USDT-SWAP": {"margin_usdt": 100}})
         self.assertEqual(out["BTC-USDT-SWAP"]["decision"]["margin_usdt"], 100.0)
 
-    def test_multiplier_is_clamped_to_the_band(self):
+    def test_multiplier_out_of_band_is_rejected_not_clamped(self):
+        """规划文档 §4.4-3：超出 0.5~1.5 **拒绝**该项（不是夹到边界）。
+
+        旧口径会把 99.0 夹成 1.5x（把模型申请的保证金放大 50%）、把 0.01 夹成 0.5x；
+        现在两个越界值都被丢弃 ⇒ 该项按 1.0 处理，并记 ASSET_MULTIPLIER_INVALID。
+        """
         self._write_multipliers({"multipliers": {"BTC": 99.0, "ETH": 0.01}})
         out = self._assemble(packages=[_pkg("BTC-USDT-SWAP"), _pkg("ETH-USDT-SWAP")],
                              decisions={"BTC-USDT-SWAP": {"margin_usdt": 100},
                                         "ETH-USDT-SWAP": {"margin_usdt": 100}})
-        self.assertEqual(out["BTC-USDT-SWAP"]["decision"]["margin_usdt"], 150.0)
-        self.assertEqual(out["ETH-USDT-SWAP"]["decision"]["margin_usdt"], 50.0)
+        self.assertEqual(out["BTC-USDT-SWAP"]["decision"]["margin_usdt"], 100.0)
+        self.assertEqual(out["ETH-USDT-SWAP"]["decision"]["margin_usdt"], 100.0)
+        self.assertIn("ASSET_MULTIPLIER_INVALID",
+                      out["BTC-USDT-SWAP"]["asset_multiplier_reason_codes"])
 
     def test_zero_margin_stays_zero_regardless_of_multiplier(self):
         self._write_multipliers({"multipliers": {"BTC": 1.5}})

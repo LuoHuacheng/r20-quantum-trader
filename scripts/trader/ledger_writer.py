@@ -1,5 +1,21 @@
 """交易台账与开仓意图写入（B3 抽取·trader 瘦身第四刀，第八十三刀）。
 
+## 证据章在哪盖（规划文档 §8.2 / §5.4）
+
+`record_trade` 的函数体被 `tests/extraction/test_trader_ledger_writer_extraction.py`
+逐字钉住（键集与原子写语义都是审计证据），因此**策略/记忆/风险/证据版本字段**
+由门面壳 `ai_factor_trader.record_trade` 在转调本模块前补齐：
+
+    evidence_stamp.stamp_trade_evidence(trade_data, data_dir=…, trackers=…)
+
+补齐的字段（只补缺失键、绝不覆盖已有值、绝不抛异常）：
+`strategy_mode` / `strategy_rule_version` / `rule_set_hash` / `policy_hash` /
+`memory_revision` / `baseline_hash` / `initial_stop_px` / `initial_risk_px` /
+`breakeven_mode` / `asset_multiplier` / `risk_budget_snapshot` / `entry_snapshot` /
+`snapshot_source` / `snapshot_observability` / `signal_id` /
+`exit_reason_code` / `pnl_gross` / `fees` / `funding` / `slippage_estimate` /
+`snapshot_at_exit` / `cooldown_recorded`。
+
 从 `scripts/ai_factor_trader.py` **纯搬家**两函数（36 + 27 行）：
 
 | 函数 | 职责 |

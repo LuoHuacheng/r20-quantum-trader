@@ -42,6 +42,8 @@
 """
 from __future__ import annotations
 
+import math
+
 
 def size_for_decision(*, ai_margin, ai_lever, price, ct_val, step_sz, base_sz,
                       usdt_available, actual_sz, quantize_size,
@@ -73,3 +75,87 @@ def size_for_decision(*, ai_margin, ai_lever, price, ct_val, step_sz, base_sz,
         actual_sz = quantize_size(actual_sz, step_sz)
 
     return actual_sz
+
+
+# =============================================================================
+# 规划文档 §5.4 / §5.5：**用最终止损距离**把张数压到单笔风险预算内。
+#
+# 为什么必须补这一刀：`size_for_decision` 按「AI 申请的保证金 × 杠杆」折算张数，
+# 再由「自适应基准仓位的 0.5x~2.0x」与「可用余额硬顶」夹取 —— 全程**没有出现
+# 止损距离**。也就是说模型把止损画远一倍，在同一保证金下实际 1R 风险也翻倍，
+# 而执行层的风险预算（`risk_per_trade_usd` ∩ 权益比例）只写在提示词里、无人执行。
+#
+# 本函数是**只减不增**的天花板：最终张数 = min(原张数, 风险预算 / 风险距离)。
+# 低于交易所最小下单量时返回 0 并给出原因（调用方 fail-closed 拒绝发单）。
+# =============================================================================
+def cap_size_by_stop_risk(*, size, entry_px, stop_px, ct_val, risk_budget_usd,
+                          min_sz: float = 0.0) -> Tuple[float, str]:
+    """返回 `(张数, 说明)`；说明为空表示未收紧。
+
+    口径：`初始风险 = |entry - stop| × 张数 × 面值 ≤ 单笔风险预算`。
+    参数不全（止损=入场、面值≤0、预算≤0、张数≤0）时**原样返回**（不猜、不放大）。
+    """
+    try:
+        size = float(size)
+        entry_px = float(entry_px)
+        stop_px = float(stop_px)
+        ct_val = float(ct_val)
+        risk_budget_usd = float(risk_budget_usd)
+        min_sz = float(min_sz or 0.0)
+    except (TypeError, ValueError):
+        return size, ""
+    risk_px = abs(entry_px - stop_px)
+    if size <= 0 or risk_px <= 0 or ct_val <= 0 or risk_budget_usd <= 0:
+        return size, ""
+    max_sz = risk_budget_usd / (risk_px * ct_val)
+    if min_sz > 0:
+        # 按交易所步长向下量化（只减不增；`min_sz` 在本仓即步长口径）。
+        max_sz = math.floor(max_sz / min_sz) * min_sz
+    if max_sz >= size:
+        return size, ""
+    if max_sz <= 0 or (min_sz > 0 and max_sz < min_sz):
+        return 0.0, (f"按最终止损距离 {risk_px:g} 与单笔风险预算 {risk_budget_usd:.2f}U "
+                     f"推导的最大张数 {max_sz:g} 低于最小下单量 {min_sz:g}，本周期不交易该标的")
+    return round(max_sz, 10), (f"按最终止损距离 {risk_px:g} 与单笔风险预算 {risk_budget_usd:.2f}U "
+                              f"收紧张数 {size:g} → {round(max_sz, 10):g}")
+
+
+def stop_risk_limits(inst_id: str, *, usdt_available=None, pool=None) -> dict:
+    """该标的的「单笔风险预算 / 最小下单量 / 面值」（规划文档 §5.4）。
+
+    来源是标的池的单一事实源（`risk_per_trade_usd` / `minSz` / `ctVal`）∩ 权益比例；
+    池读不到时返回空 dict（调用方跳过收紧，不臆造预算）。
+    """
+    try:
+        if pool is None:
+            try:
+                from scripts.instrument_pool import load_instruments
+            except ImportError:  # pragma: no cover
+                from instrument_pool import load_instruments
+            pool = load_instruments()
+    except Exception:
+        return {}
+    entry = None
+    for item in pool or []:
+        if str(item.get("instId") or "").upper() == str(inst_id or "").upper():
+            entry = item
+            break
+    if entry is None:
+        return {}
+    try:
+        try:
+            from scripts.risk_constants import effective_risk_per_trade as _eff
+        except ImportError:  # pragma: no cover
+            from risk_constants import effective_risk_per_trade as _eff
+        budget = _eff(float(entry.get("risk_per_trade_usd") or 0.0), usdt_available)
+    except Exception:
+        budget = float(entry.get("risk_per_trade_usd") or 0.0)
+    try:
+        min_sz = float(entry.get("minSz") or 0.0)
+    except (TypeError, ValueError):
+        min_sz = 0.0
+    try:
+        ct_val = float(entry.get("ctVal") or 0.0)
+    except (TypeError, ValueError):
+        ct_val = 0.0
+    return {"risk_budget_usd": float(budget or 0.0), "min_sz": min_sz, "ct_val": ct_val}

@@ -85,6 +85,8 @@
 | `backup_runtime.py` | 481 | 备份作业运行时：打包 / 加密 / 校验 / 投递 |
 | `backup_upload.py` | 282 | 备份上传目标：S3 / OSS / WebDAV / 百度网盘 |
 | `self_improvement_engine.py` | 782 | LLM 原生自省与策略演化引擎 |
+| `migrate_evolution_memory.py` | 228 | **自进化记忆迁移工具**（规划文档 §11.3）：默认只读差异报告；`--apply --expected-version <hash>` 才原子提交；补 schema 字段/补回代码基准/不自动启用或删除历史条目 |
+| `strategy_rules.py` | 245 | **L1 策略硬规则注册表**（规划文档 §5.1）：版本化规则集（`trend_following@1` / `legacy@1`）、RSI 极值追价与反向 Jerk 门禁、保本触发价（ATR/R 两口径纯函数）、执行策略解析与规则集 hash。纯函数、不读网络/LLM/文件；`unknown` 模式一律 fail-closed |
 | `local_lock.py` | 114 | `file_lock` 的**本地兜底**实现（跨主机锁的降级路径） |
 | `qq_notifier.py` | 157 | 通知发布器，桥接 R20 网关 |
 | `db_manager.py` | 282 | SQLite 连接/建表管理 |

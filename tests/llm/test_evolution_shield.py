@@ -62,13 +62,16 @@ class EvolutionShieldTests(unittest.TestCase):
         baseline = rollback_to_baseline(expected_version=shield.read_memory_snapshot()["version"])
         self.assertGreaterEqual(len(baseline), 4)
 
-        # Toggle first lesson
+        # Toggle first lesson（规划文档 §4.1-5：停用基线必须带人工确认 token）
         first_id = baseline[0]["id"]
-        toggled = toggle_lesson(first_id, expected_version=shield.read_memory_snapshot()["version"])
+        with self.assertRaises(shield.MemoryBaselineError):
+            toggle_lesson(first_id, expected_version=shield.read_memory_snapshot()["version"])
+        toggled = toggle_lesson(first_id, expected_version=shield.read_memory_snapshot()["version"],
+                                confirm_token=shield.baseline_disable_token(first_id))
         self.assertIsNotNone(toggled)
         self.assertFalse(toggled["enabled"])
 
-        # Toggle back
+        # Toggle back（恢复启用不需要 token）
         toggled_back = toggle_lesson(first_id, expected_version=shield.read_memory_snapshot()["version"])
         self.assertTrue(toggled_back["enabled"])
 

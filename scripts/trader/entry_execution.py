@@ -393,3 +393,69 @@ def execute_entry_scan(*,
                     executed_actions.append(entry_failure_message(
                         is_long=False, name=f["name"], order_ref=order_ref))
 
+
+
+# =============================================================================
+# 规划文档 §5.4：「entry_execution.py 使用统一策略规则做硬门禁」。
+#
+# ⚠️ 搬进本模块的 `execute_entry_scan` 函数体被 `tests/extraction/
+# test_trader_entry_execution_extraction.py` 以 AST 逐字钉住（含 41 个同名注入参数），
+# 不能在循环里插行。因此硬门禁做成**扫描前的独立一关**：门面在调用扫描前先把
+# 被统一规则拒绝的标的在大脑缓存里降级成 WAIT —— 扫描只认
+# `action in {BUY_LONG, SELL_SHORT}`，降级后自然跳过，等价于入口硬门禁。
+# =============================================================================
+
+
+def apply_strategy_hard_gates(*, all_factors, brain_cache, log=None):
+    """把被统一策略硬规则拒绝的标的降级为 WAIT（就地改 `brain_cache`）。
+
+    规则来源与核心拦截器、下单前复验**同一份**（`scripts/strategy_rules`）：
+    按 `strategy_mode` 选规则集，未知模式/规则不可读一律 fail-closed 拒绝开仓。
+    返回被拦截的 `[{instId, name, reason, setup_kind}]` 供动作流水与审计使用。
+    """
+    blocked = []
+    if not isinstance(brain_cache, dict):
+        return blocked
+    try:
+        from scripts.strategy_rules import (StrategyRuleError, evaluate_strategy_hard_rules,
+                                            extract_gate_inputs)
+    except ImportError:  # pragma: no cover - scripts/ 单独在 sys.path 时
+        from strategy_rules import (StrategyRuleError, evaluate_strategy_hard_rules,
+                                    extract_gate_inputs)
+    for f in all_factors or []:
+        # 调用方可能传非 dict 元素（历史夹具/上游形状漂移）：跳过而不是崩，
+        # 崩掉会让整轮新开仓被 fail-closed 冻结（那是给"规则不可用"准备的）。
+        if not isinstance(f, dict):
+            continue
+        inst_id = str(f.get("instId") or "")
+        if not inst_id:
+            continue
+        info = brain_cache.get(inst_id)
+        if not isinstance(info, dict):
+            continue
+        decision = info.get("decision")
+        if not isinstance(decision, dict):
+            continue
+        action = str(decision.get("action") or "WAIT").upper()
+        if action not in {"BUY_LONG", "SELL_SHORT"}:
+            continue
+        try:
+            gate_inputs = extract_gate_inputs(f, decision,
+                                              {"strategy_mode": info.get("strategy_mode")})
+            allowed, reason, setup_kind = evaluate_strategy_hard_rules(
+                action=action, strategy_mode=str(info.get("strategy_mode") or "legacy"),
+                rsi=gate_inputs.get("rsi_15m"), jerk=gate_inputs.get("jerk"),
+                setup_kind=gate_inputs.get("setup_kind"))
+        except StrategyRuleError as exc:
+            allowed, reason, setup_kind = False, f"策略规则读取失败: {exc}", "unknown"
+        except Exception as exc:  # 规则层任何意外都 fail-closed
+            allowed, reason, setup_kind = False, f"策略硬规则不可用: {exc}", "unknown"
+        if allowed:
+            continue
+        decision["action"] = "WAIT"
+        decision["summary_reason"] = f"策略硬门禁拒绝: {reason}"
+        blocked.append({"instId": inst_id, "name": f.get("name") or inst_id,
+                        "reason": reason, "setup_kind": setup_kind})
+        if log:
+            log(f"[策略硬门禁] {inst_id} 降级 WAIT：{reason}")
+    return blocked

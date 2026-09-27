@@ -166,11 +166,113 @@ def extract_evolution_mind_fingerprint(
     enabled_count = len([item for item in lessons if isinstance(item, dict) and item.get("enabled", True)])
     total_count = len(lessons)
 
+    # 2026-09-27（规划文档 §8.1）：记忆单元额外记录 baseline hash 与**实际注入条目 ID**——
+    # 策略快照要能还原「当时模型到底看到了哪几条心法」。
+    baseline_hash = ""
+    injected_ids: List[str] = []
+    try:
+        # evolution_shield 的**模块全局**可能被测试 patch（沙箱文件），
+        # 故仍按既有方式在调用期解析它，而不是从 snap 里反推。
+        sys_path_added = False
+        scripts_dir = str((root_dir or root) / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+            sys_path_added = True
+        try:
+            from evolution_shield import baseline_manifest_hash, select_injected_lessons
+            baseline_hash = baseline_manifest_hash()
+            injected_ids = [str(i.get("id")) for i in select_injected_lessons(lessons)["injected"]
+                            if isinstance(i, dict) and i.get("id")]
+        finally:
+            if sys_path_added and scripts_dir in sys.path:
+                try:
+                    sys.path.remove(scripts_dir)
+                except ValueError:
+                    pass
+    except Exception as e:
+        logger.warning("Failed to fingerprint memory baselines: %s", e)
+
     return {
         "version": version,
+        "authority_hash": version,
         "enabled_count": enabled_count,
         "total_count": total_count,
+        "baseline_hash": baseline_hash,
+        "injected_lesson_ids": injected_ids,
     }
+
+
+def extract_execution_policy_fingerprint(
+    root: Path,
+    prompt_profile: Optional[Dict[str, Any]] = None,
+    root_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """执行策略指纹（规划文档 §7.1 / §8.1）：mode / revision / rule_set_hash。
+
+    旧 profile 缺 `execution_policy` ⇒ `legacy@1`（行为不变）；未知 mode/rule_set
+    不得伪造成 legacy —— 如实标记 `invalid` 并把错误带出来，让上层 fail-closed。
+    """
+    r_dir = root_dir or root
+    prof = prompt_profile
+    if prof is None:
+        sys_path_added = False
+        scripts_dir = str(r_dir / "scripts")
+        try:
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+                sys_path_added = True
+            from prompt_library import active_profile
+            prof = active_profile()
+        except Exception as e:
+            logger.warning("Failed to load active profile for execution policy: %s", e)
+            prof = {}
+        finally:
+            if sys_path_added and scripts_dir in sys.path:
+                try:
+                    sys.path.remove(scripts_dir)
+                except ValueError:
+                    pass
+    try:
+        import importlib
+        strategy_rules = None
+        try:
+            strategy_rules = importlib.import_module("scripts.strategy_rules")
+        except ImportError:
+            strategy_rules = importlib.import_module("strategy_rules")
+        policy = strategy_rules.resolve_execution_policy(prof or {})
+        return {
+            "mode": policy["mode"],
+            "revision": policy["revision"],
+            "rule_set": policy["rule_set"],
+            "rule_set_hash": strategy_rules.rule_set_hash(policy["rule_set"]),
+            "strategy_rule_version": strategy_rules.strategy_rule_version(policy["rule_set"]),
+            "valid": True,
+        }
+    except Exception as e:
+        return {"mode": "invalid", "revision": 0, "rule_set": "", "rule_set_hash": "",
+                "strategy_rule_version": "", "valid": False, "error": str(e)[:160]}
+
+
+def extract_risk_config_fingerprint(
+    root: Path,
+    risk_config: Optional[Dict[str, Any]] = None,
+    root_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """风险配置指纹（规划文档 §8.1）：把执行层风控常量压成一个稳定 hash。"""
+    values = risk_config
+    if values is None:
+        try:
+            from r20_backend import risk_config as risk_config_module
+            values = risk_config_module.current_values()
+        except Exception as e:
+            logger.warning("Failed to read risk config: %s", e)
+            values = {}
+    if not isinstance(values, Mapping):
+        values = {}
+    canonical = {str(k): values[k] for k in sorted(values)}
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
+    return {"hash": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16],
+            "count": len(canonical), "values": canonical}
 
 
 def extract_interceptors_fingerprint(

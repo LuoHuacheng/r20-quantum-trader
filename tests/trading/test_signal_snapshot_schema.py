@@ -60,8 +60,23 @@ class SignalSnapshotSchemaTests(unittest.TestCase):
         self.assertEqual(snap["is_fat_tail"], False)
         self.assertEqual(snap["dynamics_quality"], 0.87)
         self.assertEqual(snap["rsi"], 55.0)
-        none_keys = [k for k, v in snap.items() if v is None]
+        # v2 策略证据字段（规划文档 §3.3）纯附加；None 计数只看旧 24 字段，
+        # 避免新增字段把「旧 schema 是否被填满」这个判据冲淡。
+        base_keys = [k for k in snap if k not in {
+            "schema_version", "snapshot_source", "snapshot_observability", "captured_at",
+            "signal_time", "open_time", "age_seconds_at_fill", "strategy_version",
+            "strategy_mode", "setup_kind", "policy_hash", "venue", "instId", "side",
+            "atr_1h", "atr_15m", "rsi_15m", "adx_5m", "adx_1h", "jerk_15m", "regime",
+            "donchian", "risk"}]
+        none_keys = [k for k in base_keys if snap[k] is None]
         self.assertLessEqual(len(none_keys), 6)           # 至少 18/24 有值（旧版只有 2）
+        self.assertEqual(snap["schema_version"], 2)
+        self.assertEqual(snap["snapshot_source"], "direct_signal_journal")
+        self.assertEqual(snap["atr_15m"], 370.0)         # 15M ATR 显式标注周期
+        self.assertEqual(snap["jerk_15m"], 2.5)
+        self.assertIn(snap["snapshot_observability"],
+                      {"STRATEGY_OBSERVED", "STRATEGY_PARTIAL", "DYNAMICS_OBSERVED",
+                       "PARTIAL", "PRICE_ONLY", "NONE"})
 
     def test_factor_library_schema_still_works(self):
         snap = aft.build_signal_snapshot(dict(FACTOR_LIBRARY_F))

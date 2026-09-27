@@ -68,6 +68,15 @@ class TradeRecord:
     pnl_pct: float
     exit_reason: str  # "TAKE_PROFIT" | "STOP_LOSS" | "TRAILING_STOP"
     r_multiple: float
+    # ── 规划文档 §12.4：回测必须能逐笔对账成本与证据，不能只有胜率 ──
+    # 默认值让旧构造点（测试夹具）无需改动。
+    fee_usd: float = 0.0        # 开仓 taker + 平仓 maker（与 settle_exit 同口径反推）
+    slippage_usd: float = 0.0   # 开/平两侧按配置滑点率估算（回测不建模盘口深度）
+    funding_usd: float = 0.0    # ⚠️ 回测**不建模**资金费 —— 结构性 0，不是"没付费"
+    rsi_15m: Optional[float] = None
+    jerk_15m: Optional[float] = None
+    regime: str = ""
+    strategy_mode: str = ""
 
 
 @dataclass
@@ -89,6 +98,9 @@ class BacktestSummary:
     gatekeeper_filtered_count: int
     equity_curve: List[Dict[str, Any]] = field(default_factory=list)
     recent_trades: List[Dict[str, Any]] = field(default_factory=list)
+    #: 全量成交（规划文档 §12.4：影子规则与扩展绩效需要**每一笔**，
+    #: `recent_trades` 只有最后 10 笔）。默认空列表保持旧构造点兼容。
+    all_trades: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def fetch_okx_candles(inst_id: str, bar: str = "1H", limit: int = 100) -> List[Dict[str, Any]]:
@@ -132,6 +144,7 @@ class BacktestEngine:
         slippage: float = 0.0002,
         min_confidence_gate: float = 0.75,
         min_rr_gate: float = 2.0,
+        strategy_mode: str = "trend_confirm_5m",
     ):
         self.initial_capital = initial_capital
         self.capital = initial_capital
@@ -141,6 +154,9 @@ class BacktestEngine:
         self.slippage = slippage
         self.min_confidence_gate = min_confidence_gate
         self.min_rr_gate = min_rr_gate
+        #: 影子规则评估用的策略模式（规划文档 §12.4 / 阶段 C）：只用于**统计**
+        #: "如果执行会拒哪些交易"，**不拦截**任何回测成交。
+        self.strategy_mode = str(strategy_mode or "")
 
     def run(self, candle_series: List[Dict[str, Any]], signals: Optional[List[Dict[str, Any]]] = None) -> BacktestSummary:
         symbol = candle_series[0].get("symbol", "PORTFOLIO") if candle_series else "UNKNOWN"
@@ -210,6 +226,9 @@ class BacktestEngine:
                     pos=pos, high=h, low=l, close=c, slippage=self.slippage)
 
                 if _exit.should_exit:
+                    _gross = ((_exit.exit_price - pos["entry_price"])
+                              if pos["direction"] == "LONG"
+                              else (pos["entry_price"] - _exit.exit_price)) * pos["size"]
                     pnl, pnl_pct, r_mult = settle_exit(
                         pos=pos, decision=_exit,
                         taker_fee=self.taker_fee, maker_fee=self.maker_fee)
@@ -228,6 +247,16 @@ class BacktestEngine:
                             pnl_pct=round(pnl_pct * 100, 2),
                             exit_reason=_exit.exit_reason,
                             r_multiple=round(r_mult, 2),
+                            # 成本反推（§12.4）：settle_exit 里 pnl = 毛盈亏 - 手续费，
+                            # 故手续费 = 毛盈亏 - 净盈亏；滑点按配置率×两侧名义额估算。
+                            fee_usd=round(_gross - pnl, 4),
+                            slippage_usd=round((abs(pos["entry_price"]) + abs(_exit.exit_price))
+                                               * pos["size"] * self.slippage, 4),
+                            funding_usd=0.0,
+                            rsi_15m=pos.get("rsi_15m"),
+                            jerk_15m=pos.get("jerk_15m"),
+                            regime=str(pos.get("regime") or ""),
+                            strategy_mode=str(pos.get("strategy_mode") or self.strategy_mode or ""),
                         )
                     )
                     active_position = None
@@ -261,6 +290,13 @@ class BacktestEngine:
                         sig=sig, close=c, timestamp=ts, capital=self.capital,
                         risk_per_trade_pct=self.risk_per_trade_pct,
                         slippage=self.slippage, rr=rr)
+                    # 影子规则所需的开仓时刻证据（§12.4）：只**挂到内部仓位 dict**，
+                    # 不改 `build_entry_candidate` 的返回键集（那是对拍门钉住的契约）。
+                    if active_position is not None:
+                        active_position["rsi_15m"] = sig.get("rsi_15m", sig.get("rsi"))
+                        active_position["jerk_15m"] = sig.get("jerk_15m", sig.get("jerk"))
+                        active_position["regime"] = sig.get("regime") or sig.get("market_regime") or ""
+                        active_position["strategy_mode"] = sig.get("strategy_mode") or self.strategy_mode
 
         _metrics = compute_performance_metrics(
             trades=trades, capital=self.capital,
@@ -297,6 +333,7 @@ class BacktestEngine:
             gatekeeper_filtered_count=filtered_by_gatekeeper,
             equity_curve=equity_curve_data[:: max(1, len(equity_curve_data) // 20)],  # sampled for mini-chart
             recent_trades=recent_trades_json,
+            all_trades=[asdict(t) for t in trades],
         )
 
 
@@ -308,43 +345,58 @@ def run_full_portfolio_backtest(bar: str = "1H", limit: int = 100, capital_per_a
     symbols = DEFAULT_SYMBOLS
     asset_results = {}
     combined_trades = []
-    total_initial = capital_per_asset * len(symbols)
+    #: 全量成交（`recent_trades` 只有每个标的最后 10 笔）：影子规则与扩展绩效要逐笔。
+    combined_all_trades: List[Dict[str, Any]] = []
+    total_initial = 0.0
     total_final = 0.0
     total_gatekeeper_filtered = 0
+    evaluated_symbols: List[str] = []
+    unverifiable: List[Dict[str, Any]] = []
 
     for sym in symbols:
         candles = fetch_okx_candles(sym, bar=bar, limit=limit)
         if not candles:
-            # Fallback synthetic series
-            base_p = 100.0 if "SOL" in sym else (2500.0 if "ETH" in sym else (80000.0 if "BTC" in sym else 1.0))
-            candles = []
-            for i in range(100):
-                delta = math.sin(i / 8.0) * (base_p * 0.02) + (i * base_p * 0.001)
-                c = base_p + delta
-                candles.append({
-                    "symbol": sym,
-                    "timestamp": f"09-{10 + (i // 24):02d} {i % 24:02d}:00",
-                    "ts_ms": i * 3600000,
-                    "open": c - (base_p * 0.002),
-                    "high": c + (base_p * 0.005),
-                    "low": c - (base_p * 0.004),
-                    "close": c,
-                    "volume": 1000.0,
-                })
-
+            # ⚠️ 规划文档 §12.4：「回测不能使用合成行情替代缺失真实数据。
+            # 缺数据必须标记不可验证」——旧实现在此处用 sin() 造 100 根假 K 线，
+            # 等于用假数据得出真结论。现改为如实标记并**排除出聚合**。
+            unverifiable.append({"symbol": sym, "status": "UNVERIFIABLE",
+                                 "reason": "NO_REAL_CANDLES"})
+            asset_results[sym] = {"symbol": sym, "status": "UNVERIFIABLE",
+                                  "reason": "NO_REAL_CANDLES", "total_trades": 0}
+            continue
+        evaluated_symbols.append(sym)
         engine = BacktestEngine(initial_capital=capital_per_asset)
         summary = engine.run(candles)
         asset_results[sym] = asdict(summary)
+        total_initial += capital_per_asset
         total_final += summary.final_equity
         total_gatekeeper_filtered += summary.gatekeeper_filtered_count
         combined_trades.extend(summary.recent_trades)
+        combined_all_trades.extend(getattr(summary, "all_trades", None) or summary.recent_trades)
 
-    # Portfolio combined performance
+    # Portfolio combined performance（仅用**真实行情**评测出的标的）
     portfolio_summary = aggregate_portfolio(
-        asset_results=asset_results, symbols=symbols,
-        total_initial=total_initial, total_final=total_final,
+        asset_results={s: asset_results[s] for s in evaluated_symbols},
+        symbols=evaluated_symbols or ["PORTFOLIO"],
+        total_initial=total_initial or capital_per_asset,
+        total_final=total_final or capital_per_asset,
         total_gatekeeper_filtered=total_gatekeeper_filtered,
         combined_trades=combined_trades)
+
+    # §12.4：完整绩效面板（成本/滑点/R/分组/规则触发/反例/完整性）
+    try:
+        from scripts.backtest.evidence import compute_extended_metrics
+        extended = compute_extended_metrics(combined_all_trades,
+                                            initial_capital=total_initial or capital_per_asset)
+    except Exception as exc:  # 统计不可得不得把报告整个打挂
+        extended = {"error": str(exc)[:200]}
+
+    # 影子硬规则（阶段 C / §12.4）：只**计算**会拒哪些交易，不改变任何回测成交。
+    try:
+        from scripts.backtest.evidence import shadow_rule_report
+        shadow_report = shadow_rule_report(combined_all_trades)
+    except Exception as exc:
+        shadow_report = {"error": str(exc)[:200]}
 
     full_payload = {
         "updated_at": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S (北京时间)"),
@@ -352,7 +404,12 @@ def run_full_portfolio_backtest(bar: str = "1H", limit: int = 100, capital_per_a
         "limit": limit,
         "portfolio": portfolio_summary,
         "by_symbol": asset_results,
-        "active_symbols": symbols,
+        "active_symbols": evaluated_symbols,
+        "unverifiable_symbols": unverifiable,
+        "extended_metrics": extended,
+        "shadow_rules": shadow_report,
+        # §12.4 诚实披露：回测建了什么成本、没建什么（资金费结构性为 0）。
+        "modeled_costs": {"fees": True, "slippage": True, "funding": False},
     }
     return full_payload
 

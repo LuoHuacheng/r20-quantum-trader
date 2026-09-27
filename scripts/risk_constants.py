@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -121,6 +122,57 @@ PORTFOLIO_RISK_BUDGET_USDT = _env_float("R20_PORTFOLIO_RISK_BUDGET_USDT", 0.0)
 # 超过本上限即拒开（不夹取——敞口超限意味着这笔根本不该发）。
 MAX_TOTAL_EXPOSURE_USDT = _env_float("R20_MAX_TOTAL_EXPOSURE_USDT", 0.0)
 
+# ── 相关标的组（规划文档 §5.7）─────────────────────────────────────
+# 相关标的同向敞口不能只停留在心法文本里。分两步落地：
+#   1) 同一相关组内同向持仓**数量**上限（拦截器管线，所有下单路径生效）；
+#   2) 同一相关组内同向已有风险 + 新单风险 ≤ group_risk_cap（执行层）。
+# 相关组与上限属 **L0/L1**：只能改这里（代码）或后台风控页，**不能**由 LLM 或记忆文本修改。
+_DEFAULT_CORRELATION_GROUPS = {
+    "large_cap_crypto": ["BTC", "ETH"],
+    "high_beta_crypto": ["SOL", "DOGE", "SUI"],
+}
+
+
+def _env_json(key: str, default):
+    raw = os.getenv(key, "")
+    if not raw.strip():
+        return default
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return default
+    return parsed if isinstance(parsed, dict) else default
+
+
+CORRELATION_GROUPS = _env_json("R20_CORRELATION_GROUPS", _DEFAULT_CORRELATION_GROUPS)
+#: 同一相关组内同向持仓数量上限（0 = 不额外收紧）。
+MAX_GROUP_SAME_DIRECTION_POSITIONS = _env_int("R20_MAX_GROUP_SAME_DIRECTION", 2)
+#: 同一相关组同向**风险额**占可用余额比例上限（与单标的/组合上限取小）。
+GROUP_RISK_CAP_EQUITY_RATIO = _env_float("R20_GROUP_RISK_CAP_RATIO", 0.06)
+#: 同一相关组同向风险额绝对封顶（USDT）。
+MAX_GROUP_RISK_USDT = _env_float("R20_MAX_GROUP_RISK_USDT", 200.0)
+
+
+def correlation_group_of(inst_id: str, groups=None) -> str:
+    """标的 → 相关组名（无配置返回 `""`）。只按 base 名匹配，大小写不敏感。"""
+    base = str(inst_id or "").split("-")[0].split("/")[0].upper()
+    if not base:
+        return ""
+    table = groups if isinstance(groups, dict) else CORRELATION_GROUPS
+    for name, members in (table or {}).items():
+        if any(str(m).upper() == base for m in (members or [])):
+            return str(name)
+    return ""
+
+
+def effective_group_risk_cap(usdt_available: float = None, *,
+                             group: str = "") -> float:
+    """相关组同向风险额上限 = min(绝对封顶, 可用余额 × 比例)（同单标的/日亏口径）。"""
+    cap = MAX_GROUP_RISK_USDT
+    if usdt_available and usdt_available > 0:
+        cap = min(cap, max(round(float(usdt_available) * GROUP_RISK_CAP_EQUITY_RATIO, 2), 0.0))
+    return cap
+
 # ── 默认值表（供后台风控管理页 schema 引用，键 = 环境变量名） ────
 # 注意：必须是字面量默认值，绝不能引用上面「已按 .env 解析」的常量——
 # 否则后台进程在用户应用过套件后重启，DEFAULTS 会被 .env 污染，
@@ -152,6 +204,9 @@ DEFAULTS = {
     "R20_SCALE_OUT_RATIO": 0.50,
     "R20_SCALE_OUT_TRIGGER_ATR": 1.20,
     "R20_MAX_TAKE_PROFIT_ATR": 3.50,
+    "R20_MAX_GROUP_SAME_DIRECTION": 2,
+    "R20_GROUP_RISK_CAP_RATIO": 0.06,
+    "R20_MAX_GROUP_RISK_USDT": 200.0,
 }
 
 RISK_ENV_KEYS = tuple(DEFAULTS.keys())

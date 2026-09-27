@@ -1,53 +1,80 @@
 # 自进化
 
-## 逐单归因
+> ⚠️ 本页是**生成式复盘报告的落点**。正式内容由
+> `scripts/evolution/report.py::render_self_evolution_doc` 依据
+> `data/self_improvement_report.json` 生成，本文件只保留**结构与口径说明**，
+> 人工补充必须带 `author` / `created_at` / `source` / `status` / `reviewed_by`。
 
-### 数理快照缺失与不可观测标记
+## 报告时间与版本
 
-台账早期交易（2026-09-08至2026-09-09期间的ADA、XRP、LINK、ARB等6笔交易）的entry_snapshot为null，数理快照不可观测，根据证据纪律不作主观事后因果归因。
+- 报告时间：见报告 `timestamp`（北京时间）
+- 报告 schema：`report_schema_version = 2`
+- 台账 revision / 记忆 revision / 策略 hash / baseline hash：逐份报告内给出
+- 证据策略版本：`evidence_policy_version = 2`
 
-### 核心亏损完全由追极值与微观动能衰竭引发
+## 台账起止与观测性
 
-台账中显著亏损单均出现对极值区及反向动能冲击的违背。例如pos_0365bdc28c4af55dc15ea7fa9a489dc1（XRP多单净亏-1.11U，15M RSI达79.7极值追多且4H Jerk为-2.9942）、pos_71743423c4ad1be07903999744b713a0（UNI空单净亏-1.21U，15M RSI跌至13.5严重超卖仍追空）、pos_095c89efaaaded1085ea743561cbd221（SOL多单净亏-1.08U，1H RSI高达87.4追多且15M Jerk为-3.0），直接导致触损，这充分反向验证了已有记忆库第四条禁令的极端必要性。
+- 有效交易数、不可观测交易数（PRICE_ONLY + NONE）
+- 快照来源分布（`direct_signal_journal` / `matched_signal_journal` /
+  `legacy_signal_snapshot` / `calculus_snapshot_fallback` / `unavailable`）
+- 独立样本组数量与重复信号证据组数量
+- 成本分项：手续费、资金费、滑点（来自台账字段，缺失按不可验证标记）
 
-### 大幅盈利单高度符合共振加速与趋势持续特征
+> ⚠️ **不写死累计盈亏**。任何盈亏数字都必须来自当轮报告，不得在本文件手工固化。
 
-实盘斩获丰厚利润的代表性交易（如pos_49bd521ada7221ab7b45aaa6b121c03f的ARB多单+3.34U、pos_70285ed0085f97674fe119ed95a3d713的SUI多单+3.92U、pos_9f249070a8dab714985becb6c8f79908的ARB多单+2.51U）均发生在4H大级别通道顺势、多周期动能加速（KINETIC_ACCELERATING）、定积分能量扩张且延续概率>70%的环境中，证明数理动量共振模型具备高度正期望。
+## 基准一致性
 
-### 低杠杆与浮盈移损体系有效锁死回撤下限
+- `healthy` / `missing_ids` / `mismatched_ids` / `unexpected_ids`
+- 代码基准（`BASELINE_LESSONS`）与结构化记忆中启用的 baseline 每次发布前后必须一致；
+  不一致时禁止发布、后台显示 CRITICAL、交易继续使用代码硬规则。
 
-全量交易严格执行3.0x低杠杆，累计手续费-4.73 USDT占毛利比例健康。台账中大量记录显示触发‘保护失效退出’与‘移动止盈’（如SOL +0.136U、ARB +0.075U、XRP +0.232U等），多次在行情剧烈反转前将头寸以保本或微利了结，彻底隔绝深幅利润回撤风险。
+## 事实 / 已审核启发式 / 待验证观察 / 规则提案
 
-## 黄金心法库
+四层**必须分开**：
 
-### 严禁跨标的同向共振堆叠单边敞口
+| 层 | 含义 | 能否进交易提示词 |
+|---|---|---|
+| 事实 `facts` | 可从台账直接读出 | 不进（供复盘） |
+| 已审核启发式 | ≥2 个独立样本组 + ≥2 个时间窗口 + 反例检查 + 声明 scope | 进（辅助证据，不得覆盖硬规则） |
+| 待验证观察 `observation_only` | 样本/独立性不足，降级保留 | 进【待验证观察】区块，不得单独构成开仓理由 |
+| 规则提案 `rule_proposals` | 触碰硬规则或声称基线失效 | **不进**，进人工审批队列 |
 
-无论阻力高空还是顺势做多，严禁在多相关标的（BTC/ETH/SOL/DOGE）上同向无节制开仓，必须对总同向在手仓位施加硬性约束，防范系统性 Beta 踩踏。
+## 当前执行规则引用
 
-### 宽止损抗噪杜绝随意割肉
+- 执行策略：`execution_policy.mode` / `revision` / `rule_set` / `rule_set_hash`
+- 风险配置 hash 与 baseline hash（与策略快照同源）
+- 资产乘数状态（`REVIEWED` / `NEUTRAL` / `UNAVAILABLE` / `EXPIRED` / `INVALID` / `PENDING_REVIEW`）
 
-止损必须设在结构外 1.8x~2.2x 1H ATR 以外，给足波动呼吸空间，从物理上隔绝 15M/5M 杂波插针洗损。
+## 数值口径（禁止混写）
 
-### 浮盈0.8R坚决保本锁死胜率
+- **杠杆**：风控页配置区间内的当前配置，不是"固定 3.0x"。
+- **止损**：`initial_stop = 入场价 ∓ ATR × stop_loss_atr_mult`；本仓执行层使用 15M ATR，
+  回测必须显式注明周期。
+- **保本**：峰值浮盈 ≥ `breakeven_trigger_atr × ATR` 时把止损推到保本 ——
+  现行口径是 **ATR**（`breakeven_mode = ATR_MULTIPLE`），**不是** R 口径；
+  `initial_risk_px` 同时逐笔记录，供后续切换评估。
+- **RSI/Jerk**：属**目标策略参数**，只对 `trend_following_*` 生效；
+  均值回归策略不使用同一门禁；边界严格（RSI=75.0 放行、75.01 拒绝）。
+- **资产乘数**：只缩放模型申请的保证金，不改变杠杆/止损/熔断/置信度门槛。
+- **历史观察 / 当前配置 / 目标参数**：三者必须分别标注，历史参数不得写成当前配置。
 
-持仓浮盈达到 0.8R~1.0R 坚决执行保本移损 (UPDATE_SL)，将潜在亏损彻底消除为零风险平仓，锁死胜率下限，杜绝盈利变割肉。
+## 回滚说明
 
-### 全域严禁极值追单与微观动能衰竭盲目顺势
+1. **记忆**：`POST /api/v1/admin/memory/rollback?expected_version=…` 原子回滚到代码基准；
+   或 `scripts/migrate_evolution_memory.py --apply --expected-version <hash>` 做 schema 迁移。
+2. **硬规则**：关闭新策略模式的新开仓；已有仓位继续用入场时冻结的规则版本保护退出；
+   不回滚到无法读取新字段的旧程序。
+3. **资产乘数**：视为 1.0，`data/asset_multipliers.json` 保留原文件作审计，
+   不覆盖历史交易记录，下一轮复盘重新生成。
 
-宏观通道标签绝非微观动能衰竭的豁免牌：即使处于 4H 单边多/空通道，若 15M/1H 出现 KINETIC_EXHAUSTION、或出现反向 SHOCK_HIGH_JERK (|Jerk|>=2.5) 且反向击穿概率>75%，严禁顺大势强行开仓；极值区（15M RSI>75 追多或 15M RSI<28 追空）一律禁开同向追单，必须等待动能衰竭释放与结构企稳。
+## 人工补充
 
-## 行动清单
+<!--
+人工补充格式（缺任一字段则该段在下一轮生成时会被覆盖）：
 
-1. 在信号决策与过滤层强行刚性化15M RSI极值（>75严禁追多、<28严禁追空）以及反向SHOCK_HIGH_JERK（|Jerk|>=2.5）的一票否决权，杜绝模型在动能末端追高杀跌。
-2. 维持全品种3.0x低杠杆约束与1.8x~2.2x 1H ATR结构外宽止损配置，物理隔绝次级周期微观杂波与插针洗损。
-3. 坚决维持浮盈达到0.8R~1.0R时强制保本移损（UPDATE_SL）的风控契约，保持胜率下限与资本安全。
-
-## 开发者模式
-
-======================= 【R20 启发式实战认知与长期记忆】 =======================
-
-- 【严禁跨标的同向共振堆叠单边敞口】无论阻力高空还是顺势做多，严禁在多相关标的（BTC/ETH/SOL/DOGE）上同向无节制开仓，必须对总同向在手仓位施加硬性约束，防范系统性 Beta 踩踏。
-- 【宽止损抗噪杜绝随意割肉】止损必须设在结构外 1.8x~2.2x 1H ATR 以外，给足波动呼吸空间，从物理上隔绝 15M/5M 杂波插针洗损。
-- 【浮盈0.8R坚决保本锁死胜率】持仓浮盈达到 0.8R~1.0R 坚决执行保本移损 (UPDATE_SL)，将潜在亏损彻底消除为零风险平仓，锁死胜率下限，杜绝盈利变割肉。
-
-> 权威来源: structured_trading_memory.json | 修订 4466561e | 共 4 条心法 | 最近更新 2026-09-19 08:16:17 (UTC+8)
+author: <姓名>
+created_at: <YYYY-MM-DD HH:MM:SS>
+source: <台账/凭据/链接>
+status: <DRAFT|REVIEWED>
+reviewed_by: <复核人>
+-->

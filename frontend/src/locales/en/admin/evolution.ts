@@ -110,4 +110,28 @@ export const enAdminEvolution = {
   // ── batch 67: doctrine input and module content textarea lacked accessible names ──
   memoryInputAria: 'New playbook doctrine',
   moduleContentAria: 'Module prompt content',
+  // ── Plan §9.1/§9.3: memory inventory counters and admin alerts ──
+  inventoryTitle: 'Memory inventory and baseline consistency',
+  alertsTitle: 'Admin alerts',
+  notInjectedTitle: '{n} active lessons exceed the injection cap and are not in the main-brain prompt',
+  layers: {
+    title: 'Three-layer review (facts / hypotheses / proposals)',
+    facts: 'Facts (observable)',
+    hypotheses: 'Hypotheses',
+    proposals: 'Rule proposals',
+  },
+  inventory: {
+    total: 'Total lessons',
+    enabled: 'Enabled',
+    active: 'Active (not expired)',
+    injected: 'Actually injected',
+    notInjected: 'Not injected',
+    baseline: 'Baseline lessons',
+    baselineConsistency: 'Baseline consistency',
+    heuristics: 'Reviewed heuristics',
+    observations: 'Observations',
+    expired: 'Expired',
+    ledgerRevision: 'Latest ledger revision',
+    memoryRevision: 'Latest memory revision',
+  },
 };

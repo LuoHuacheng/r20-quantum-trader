@@ -89,6 +89,7 @@ data/policy_archives/
 data/prompt_library.json
 # 目录分文件存储（方案 B）：index.json + 一方案一文件，写粒度 = 单个方案。
 data/prompt_profiles/
+data/prompt_strategies/
 trading.html
 OPEN_SOURCE_CONTROL_TODO.md
 CONTROL_PLANE_V2_TODO.md
@@ -170,3 +171,6 @@ data/*.sqlite3
 
 # 观测栈的令牌文件（内容 = R20_ADMIN_TOKEN）：绝不入库，只走文件挂载
 deploy/observability/metrics_token
+
+# codegraph 本地索引库（工具产物，88M 二进制，永不入库）
+.codegraph/

@@ -469,6 +469,43 @@ class LLMMultiProviderTests(unittest.TestCase):
         self.assertNotIn("siliconflow", unseeded_ids)  # Keyless legacy filtered
         self.assertIn("openrouter", unseeded_ids)       # Keyed legacy preserved
 
+    def test_model_under_unsaved_provider_is_rejected_not_silently_orphaned(self):
+        """回归（2026-09-28「添加成功但列表不显示」）：
+
+        新版后台在**未保存的新供应商**详情页里也能开「添加模型」弹窗，此时
+        `selectedProvider.id` 为空串 ⇒ payload 带 `provider_id: ""`（供应商占位名
+        即 i18n `admin.llm.newProviderName`）。旧实现把它静默回落成并不存在的
+        "custom" 桶：模型只进顶层扁平表、**不进任何供应商的本地列表** ⇒ 模型连接页
+        的模型清单永远看不到它，且顶层那条坏归属会在加载期覆盖供应商本地列表推出的
+        正确归属。现在必须 400 明确拒绝，并且**不落任何盘**。
+        """
+        headers = self.login()
+
+        resp = self.client.post("/api/v1/admin/llm/models", headers=headers, json={
+            "id": "orphan-model",
+            "name": "Orphan Model",
+            "provider_id": "",
+            "provider_name": "新建自定义供应商",
+            "base_url": "https://api.example.com/v1",
+        })
+        self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertIn("供应商尚未保存", resp.json()["detail"])
+
+        cfg = llm_manager.load_llm_config()
+        self.assertFalse(any(m["id"] == "orphan-model" for m in cfg["models"]))
+        self.assertFalse(any(
+            any(m["id"] == "orphan-model" for m in p.get("models", []))
+            for p in cfg["providers"]
+        ))
+
+        # 旧版后台 / 脚本的路径必须原样：不带 provider_id 键，自由文本备注走 custom 桶
+        legacy = self.client.post("/api/v1/admin/llm/models", headers=headers, json={
+            "id": "legacy-freeform-model",
+            "provider_name": "CPA代理",
+            "base_url": "https://api.example.com/v1",
+        })
+        self.assertEqual(legacy.status_code, 200, legacy.text)
+
 
 if __name__ == "__main__":
     unittest.main()

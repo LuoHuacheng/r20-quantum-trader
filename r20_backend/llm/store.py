@@ -602,6 +602,21 @@ def upsert_model(config_file: Path, reload_config: Callable[[], Dict[str, Any]],
     if not prov and provider_name:
         prov = next((p for p in config.get("providers", []) if p.get("name") == provider_name), None)
 
+    # 归属必须落定（2026-09-28 修「添加成功但列表不显示」）：
+    # 新版后台在**未保存的新供应商**详情页里也能开「添加模型」弹窗，此时
+    # `selectedProvider.id` 是空串 ⇒ payload 带 `provider_id: ""`。旧实现把它静默
+    # 回落成并不存在的 "custom" 桶：模型只进顶层扁平表、**不进任何供应商的本地
+    # 列表**（`write_model_into_providers_local_list` 的 `prov` 为 None），于是模型
+    # 连接页的模型清单永远看不到它；更糟的是顶层那条坏归属会在加载期
+    # `fresh.update(merged)` 里反过来覆盖供应商本地列表推出的正确归属，永久卡住。
+    # 只拦「显式带了 provider_id 键」的调用：旧版后台 / 脚本压根不带该键（自由文本
+    # 备注是有意的 custom 桶），行为完全不变。
+    if not prov and "provider_id" in model_data:
+        raise ValueError(
+            f"供应商尚未保存（provider_id={str(model_data.get('provider_id') or '')!r} 不存在）："
+            "请先在「配置」页保存该供应商，再添加模型"
+        )
+
     if prov:
         if not base_url:
             base_url = prov.get("base_url", "")
